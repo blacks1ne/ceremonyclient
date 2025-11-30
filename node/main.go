@@ -361,10 +361,10 @@ func main() {
 				logger.Fatal("quorum on signatures not met")
 			}
 
-			logger.Info("signature check passed")
+			// logger.Info("signature check passed")
 		}
 	} else {
-		logger.Info("signature check disabled, skipping...")
+		// logger.Info("signature check disabled, skipping...")
 	}
 
 	if *core == 0 {
