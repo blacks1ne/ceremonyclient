@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"sync"
 	"time"
 
@@ -24,7 +25,7 @@ const (
 	// Default cache size for LRU
 	defaultGlobalCacheSize = 10000
 	// Maximum tree depth to prevent unbounded growth
-	maxGlobalTreeDepth = 10
+	maxGlobalTreeDepth = 2
 )
 
 // TimeReelEventType represents different types of events that can occur in a
@@ -1659,7 +1660,7 @@ func (g *GlobalTimeReel) bootstrapFromStore() error {
 
 		if !g.archiveMode && g.root != nil {
 			g.logger.Info(
-				"non-archive mode: accepting last 10 frames as valid chain",
+				"non-archive mode: accepting last "+strconv.Itoa(maxGlobalTreeDepth)+" frames as valid chain",
 				zap.Uint64("pseudo_root_frame", g.root.Frame.Header.FrameNumber),
 				zap.Uint64("head_frame", g.head.Frame.Header.FrameNumber),
 			)
