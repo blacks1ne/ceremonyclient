@@ -504,6 +504,7 @@ func (e *GlobalConsensusEngine) validateFrameMessage(
 				zap.Uint64("frame_rank", frame.GetRank()),
 			)
 			frameValidationTotal.WithLabelValues("ignore").Inc()
+			e.logger.Debug("ignoring frame message", zap.Int("frame number", int(frame.GetFrameNumber())), zap.Uint64("rank", frame.GetRank()))
 			return tp2p.ValidationResultIgnore
 		}
 
@@ -513,6 +514,7 @@ func (e *GlobalConsensusEngine) validateFrameMessage(
 				zap.String("reason", "frame too old"),
 			)
 			frameValidationTotal.WithLabelValues("ignore").Inc()
+			e.logger.Debug("ignoring frame message", zap.Int("frame number", int(frame.GetFrameNumber())), zap.Duration("frame age", frametime.GlobalFrameSince(frame)))
 			return tp2p.ValidationResultIgnore
 		}
 
