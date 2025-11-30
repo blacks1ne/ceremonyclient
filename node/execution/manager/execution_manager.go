@@ -206,11 +206,11 @@ func (
 	uniqueCapabilities := make(map[uint32]*protobufs.Capability)
 
 	// Iterate through all registered engines
-	for name, engine := range m.engines {
-		m.logger.Debug(
-			"collecting capabilities from engine",
-			zap.String("engine", name),
-		)
+	for _, engine := range m.engines {
+		// m.logger.Debug(
+		// 	"collecting capabilities from engine",
+		// 	zap.String("engine", name),
+		// )
 
 		// Get capabilities from the engine
 		capabilities := engine.GetCapabilities()
