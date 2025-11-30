@@ -319,13 +319,13 @@ func (e *GlobalConsensusEngine) validateShardConsensusMessage(
 }
 
 func (e *GlobalConsensusEngine) validateProverMessage(
-	peerID peer.ID,
+	_ peer.ID,
 	message *pb.Message,
 ) tp2p.ValidationResult {
-	e.logger.Debug(
-		"validating prover message from peer",
-		zap.String("peer_id", peer.ID(message.From).String()),
-	)
+	// e.logger.Debug(
+	// 	"validating prover message from peer",
+	// 	zap.String("peer_id", peer.ID(message.From).String()),
+	// )
 	// Check if data is long enough to contain type prefix
 	if len(message.Data) < 4 {
 		e.logger.Debug(
