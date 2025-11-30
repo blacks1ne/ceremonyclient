@@ -1054,8 +1054,8 @@ func (w *WorkerManager) respawnWorker(
 ) error {
 	const (
 		respawnTimeout    = 5 * time.Second
-		initialBackoff    = 50 * time.Millisecond
-		maxRespawnBackoff = 2 * time.Second
+		initialBackoff    = 1000 * time.Millisecond
+		maxRespawnBackoff = 16 * time.Second
 		maxAttempts       = 30
 	)
 
@@ -1274,4 +1274,3 @@ func (w *WorkerManager) stopDataWorkers() {
 		}
 	}
 }
-
