@@ -335,9 +335,9 @@ func (r *ProverRegistry) GetProvers(filter []byte) (
 		return bytes.Compare(result[i].Address, result[j].Address) == -1
 	})
 
-	r.logger.Debug("provers retrieved",
-		zap.Int("count", len(result)),
-		zap.String("filter", fmt.Sprintf("%x", filter)))
+	// r.logger.Debug("provers retrieved",
+	// 	zap.Int("count", len(result)),
+	// 	zap.String("filter", fmt.Sprintf("%x", filter)))
 	return result, nil
 }
 
