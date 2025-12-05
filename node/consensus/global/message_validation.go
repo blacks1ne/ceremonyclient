@@ -341,10 +341,10 @@ func (e *GlobalConsensusEngine) validateProverMessage(
 	switch typePrefix {
 
 	case protobufs.MessageBundleType:
-		e.logger.Debug(
-			"validating message bundle from peer",
-			zap.String("peer_id", peer.ID(message.From).String()),
-		)
+		// e.logger.Debug(
+		// 	"validating message bundle from peer",
+		// 	zap.String("peer_id", peer.ID(message.From).String()),
+		// )
 		// Prover messages come wrapped in MessageBundle
 		messageBundle := &protobufs.MessageBundle{}
 		if err := messageBundle.FromCanonicalBytes(message.Data); err != nil {
