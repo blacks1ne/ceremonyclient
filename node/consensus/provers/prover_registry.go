@@ -323,10 +323,10 @@ func (r *ProverRegistry) GetProvers(filter []byte) (
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	r.logger.Debug(
-		"getting provers",
-		zap.String("filter", fmt.Sprintf("%x", filter)),
-	)
+	// r.logger.Debug(
+	// 	"getting provers",
+	// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+	// )
 
 	var result []*consensus.ProverInfo
 	result = append(result, r.filterCache[string(filter)]...)
@@ -335,7 +335,9 @@ func (r *ProverRegistry) GetProvers(filter []byte) (
 		return bytes.Compare(result[i].Address, result[j].Address) == -1
 	})
 
-	r.logger.Debug("provers retrieved", zap.Int("count", len(result)))
+	r.logger.Debug("provers retrieved",
+		zap.Int("count", len(result)),
+		zap.String("filter", fmt.Sprintf("%x", filter)))
 	return result, nil
 }
 
