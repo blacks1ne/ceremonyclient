@@ -1240,10 +1240,10 @@ func (b *BlossomSub) Unsubscribe(bitmask []byte, raw bool) {
 		// Only close the bitmask if no other subscription needs it
 		if !stillNeeded {
 			if bm, ok := b.bitmaskMap[bitSliceKey]; ok {
-				b.logger.Debug(
-					"closing bit slice",
-					zap.String("bit_slice", hex.EncodeToString(bitSlice)),
-				)
+				// b.logger.Debug(
+				// 	"closing bit slice",
+				// 	zap.String("bit_slice", hex.EncodeToString(bitSlice)),
+				// )
 				bm.Close()
 				delete(b.bitmaskMap, bitSliceKey)
 			}
