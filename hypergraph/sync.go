@@ -1437,17 +1437,17 @@ func (s *streamManager) descendIndex(
 	remote *protobufs.HypergraphComparisonResponse,
 	err error,
 ) {
-	start := time.Now()
-	pathHex := hex.EncodeToString(packPath(path))
-	s.logger.Debug("descend index start", zap.String("path", pathHex))
-	defer func() {
-		s.logger.Debug(
-			"descend index finished",
-			zap.String("path", pathHex),
-			zap.Duration("duration", time.Since(start)),
-			zap.Error(err),
-		)
-	}()
+	// start := time.Now()
+	// pathHex := hex.EncodeToString(packPath(path))
+	// s.logger.Debug("descend index start", zap.String("path", pathHex))
+	// defer func() {
+	// s.logger.Debug(
+	// 	"descend index finished",
+	// 	zap.String("path", pathHex),
+	// 	zap.Duration("duration", time.Since(start)),
+	// 	zap.Error(err),
+	// )
+	// }()
 	branchInfo, err := s.getBranchInfo(path)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "descend index")
