@@ -94,9 +94,8 @@ func (h *snapshotHandle) getBranchInfo(
 	if h == nil {
 		return nil, false
 	}
-	key := string(packPath(path))
 	h.branchCacheMu.RLock()
-	resp, ok := h.branchCache[key]
+	resp, ok := h.branchCache[string(packPath(path))]
 	h.branchCacheMu.RUnlock()
 	return resp, ok
 }
@@ -118,9 +117,8 @@ func (h *snapshotHandle) getLeafData(key []byte) ([]byte, bool) {
 	if h == nil {
 		return nil, false
 	}
-	cacheKey := string(key)
 	h.leafCacheMu.RLock()
-	data, ok := h.leafDataCache[cacheKey]
+	data, ok := h.leafDataCache[string(key)]
 	h.leafCacheMu.RUnlock()
 	return data, ok
 }
@@ -151,9 +149,8 @@ func (h *snapshotHandle) isLeafMiss(key []byte) bool {
 	if h == nil {
 		return false
 	}
-	cacheKey := string(key)
 	h.leafCacheMu.RLock()
-	_, miss := h.leafCacheMiss[cacheKey]
+	_, miss := h.leafCacheMiss[string(key)]
 	h.leafCacheMu.RUnlock()
 	return miss
 }
