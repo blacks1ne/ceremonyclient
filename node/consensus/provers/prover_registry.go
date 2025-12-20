@@ -1992,14 +1992,14 @@ func (r *ProverRegistry) GetAllActiveAppShardProvers() (
 
 			// Copy allocations
 			for i, allocation := range proverInfo.Allocations {
-				r.logger.Debug(
-					"copying prover allocation for status",
-					zap.String("address", hex.EncodeToString(proverInfo.Address)),
-					zap.String(
-						"filter",
-						hex.EncodeToString(allocation.ConfirmationFilter),
-					),
-				)
+				// r.logger.Debug(
+				// 	"copying prover allocation for status",
+				// 	zap.String("address", hex.EncodeToString(proverInfo.Address)),
+				// 	zap.String(
+				// 		"filter",
+				// 		hex.EncodeToString(allocation.ConfirmationFilter),
+				// 	),
+				// )
 				proverCopy.Allocations[i] = consensus.ProverAllocationInfo{
 					Status: allocation.Status,
 					ConfirmationFilter: make(
