@@ -346,33 +346,33 @@ func (r *ProverRegistry) GetProverCount(filter []byte) (int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	r.logger.Debug(
-		"getting prover count",
-		zap.String("filter", fmt.Sprintf("%x", filter)),
-	)
+	// r.logger.Debug(
+	// 	"getting prover count",
+	// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+	// )
 
 	var trie *tries.RollingFrecencyCritbitTrie
 	if len(filter) == 0 {
 		trie = r.globalTrie
-		r.logger.Debug("counting provers in global trie")
+		// r.logger.Debug("counting provers in global trie")
 	} else {
 		if shardTrie, exists := r.shardTries[string(filter)]; exists {
 			trie = shardTrie
-			r.logger.Debug(
-				"counting provers in shard trie",
-				zap.String("filter", fmt.Sprintf("%x", filter)),
-			)
+			// r.logger.Debug(
+			// 	"counting provers in shard trie",
+			// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+			// )
 		} else {
-			r.logger.Debug(
-				"shard trie not found, returning count 0",
-				zap.String("filter", fmt.Sprintf("%x", filter)),
-			)
+			// r.logger.Debug(
+			// 	"shard trie not found, returning count 0",
+			// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+			// )
 			return 0, nil
 		}
 	}
 
 	count := len(trie.FindNearestAndApproximateNeighbors(make([]byte, 32)))
-	r.logger.Debug("prover count retrieved", zap.Int("count", count))
+	// r.logger.Debug("prover count retrieved", zap.Int("count", count))
 
 	return count, nil
 }
