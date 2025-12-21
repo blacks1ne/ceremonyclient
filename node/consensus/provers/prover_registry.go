@@ -1950,7 +1950,7 @@ func (r *ProverRegistry) GetAllActiveAppShardProvers() (
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	r.logger.Debug("getting all active app shard provers")
+	// r.logger.Debug("getting all active app shard provers")
 
 	var result []*consensus.ProverInfo
 
@@ -1968,10 +1968,10 @@ func (r *ProverRegistry) GetAllActiveAppShardProvers() (
 
 		// Only include provers with active allocations
 		if hasActiveAllocation {
-			r.logger.Debug(
-				"copying prover info for status",
-				zap.String("address", hex.EncodeToString(proverInfo.Address)),
-			)
+			// r.logger.Debug(
+			// 	"copying prover info for status",
+			// 	zap.String("address", hex.EncodeToString(proverInfo.Address)),
+			// )
 			// Make a copy to avoid external modification
 			proverCopy := &consensus.ProverInfo{
 				PublicKey:        make([]byte, len(proverInfo.PublicKey)),
@@ -2040,10 +2040,10 @@ func (r *ProverRegistry) GetAllActiveAppShardProvers() (
 		}
 	}
 
-	r.logger.Debug(
-		"retrieved active app shard provers",
-		zap.Int("count", len(result)),
-	)
+	// r.logger.Debug(
+	// 	"retrieved active app shard provers",
+	// 	zap.Int("count", len(result)),
+	// )
 
 	return result, nil
 }
