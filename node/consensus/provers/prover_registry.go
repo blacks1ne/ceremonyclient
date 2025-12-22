@@ -686,31 +686,31 @@ func (r *ProverRegistry) addProverToTrie(
 	var trie *tries.RollingFrecencyCritbitTrie
 	var filterStr string
 
-	r.logger.Debug(
-		"adding prover to trie",
-		zap.String("address", fmt.Sprintf("%x", address)),
-		zap.String("filter", fmt.Sprintf("%x", filter)),
-		zap.Uint64("frame_number", frameNumber),
-	)
+	// r.logger.Debug(
+	// 	"adding prover to trie",
+	// 	zap.String("address", fmt.Sprintf("%x", address)),
+	// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+	// 	zap.Uint64("frame_number", frameNumber),
+	// )
 
 	if len(filter) == 0 {
 		trie = r.globalTrie
 		filterStr = ""
-		r.logger.Debug("adding to global trie")
+		// r.logger.Debug("adding to global trie")
 	} else {
 		filterStr = string(filter)
 		if _, exists := r.shardTries[filterStr]; !exists {
-			r.logger.Debug(
-				"creating new shard trie",
-				zap.String("filter", fmt.Sprintf("%x", filter)),
-			)
+			// r.logger.Debug(
+			// 	"creating new shard trie",
+			// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+			// )
 			r.shardTries[filterStr] = &tries.RollingFrecencyCritbitTrie{}
 		}
 		trie = r.shardTries[filterStr]
-		r.logger.Debug(
-			"adding to shard trie",
-			zap.String("filter", fmt.Sprintf("%x", filter)),
-		)
+		// r.logger.Debug(
+		// 	"adding to shard trie",
+		// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+		// )
 	}
 
 	// Add to trie using address as key
@@ -728,18 +728,18 @@ func (r *ProverRegistry) addProverToTrie(
 		}
 		if !found {
 			r.addressToFilters[string(address)] = append(filters, filterStr)
-			r.logger.Debug(
-				"added filter to address tracking",
-				zap.String("address", fmt.Sprintf("%x", address)),
-				zap.Int("filter_count", len(r.addressToFilters[string(address)])),
-			)
+			// r.logger.Debug(
+			// 	"added filter to address tracking",
+			// 	zap.String("address", fmt.Sprintf("%x", address)),
+			// 	zap.Int("filter_count", len(r.addressToFilters[string(address)])),
+			// )
 		}
 	} else {
 		r.addressToFilters[string(address)] = []string{filterStr}
-		r.logger.Debug(
-			"created new address filter tracking",
-			zap.String("address", fmt.Sprintf("%x", address)),
-		)
+		// r.logger.Debug(
+		// 	"created new address filter tracking",
+		// 	zap.String("address", fmt.Sprintf("%x", address)),
+		// )
 	}
 
 	return nil
