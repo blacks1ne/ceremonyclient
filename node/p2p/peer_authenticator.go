@@ -221,7 +221,7 @@ func (p *PeerAuthenticator) CreateServerTLSCredentials() (
 				return err
 			}
 
-			p.logger.Debug("certificate check succeeded")
+			// p.logger.Debug("certificate check succeeded")
 
 			return nil
 		},
