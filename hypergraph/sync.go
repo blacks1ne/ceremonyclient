@@ -46,16 +46,16 @@ func (hg *HypergraphCRDT) HyperStream(
 		)
 	}()
 
-	identifyStart := time.Now()
+	// identifyStart := time.Now()
 	peerId, err := hg.authenticationProvider.Identify(requestCtx)
 	if err != nil {
 		return errors.Wrap(err, "hyper stream")
 	}
 	sessionLogger = sessionLogger.With(zap.String("peer_id", peerId.String()))
-	sessionLogger.Debug(
-		"identified peer",
-		zap.Duration("duration", time.Since(identifyStart)),
-	)
+	// sessionLogger.Debug(
+	// 	"identified peer",
+	// 	zap.Duration("duration", time.Since(identifyStart)),
+	// )
 
 	peerKey := peerId.String()
 	if addr := peerIPFromContext(requestCtx); addr != "" {
