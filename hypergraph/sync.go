@@ -42,7 +42,7 @@ func (hg *HypergraphCRDT) HyperStream(
 		sessionLogger.Info(
 			"hyperstream session finished",
 			zap.Duration("session_duration", time.Since(sessionStart)),
-			zap.Error(err),
+			zap.String("error", err.Error()), //zap.Error(err),
 		)
 	}()
 
@@ -75,13 +75,13 @@ func (hg *HypergraphCRDT) HyperStream(
 		go hg.monitorSyncSessionIdle(idleCtx, peerKey, sessionLogger, shutdownCancel)
 	}
 
-	syncStart := time.Now()
+	// syncStart := time.Now()
 	err = hg.syncTreeServer(ctx, stream, sessionLogger)
-	sessionLogger.Info(
-		"syncTreeServer completed",
-		zap.Duration("sync_duration", time.Since(syncStart)),
-		zap.Error(err),
-	)
+	// sessionLogger.Info(
+	// 	"syncTreeServer completed",
+	// 	zap.Duration("sync_duration", time.Since(syncStart)),
+	// 	zap.String("error", err.Error()), //zap.Error(err),
+	// )
 
 	hg.syncController.SetStatus(peerKey, &hypergraph.SyncInfo{
 		Unreachable: false,
