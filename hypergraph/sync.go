@@ -1892,7 +1892,7 @@ func (hg *HypergraphCRDT) syncTreeServer(
 		return errors.New("client did not send valid initialization message")
 	}
 
-	logger.Info("received initialization message")
+	// logger.Info("received initialization message")
 
 	if len(query.ShardKey) != 35 {
 		return errors.New("invalid shard key")
