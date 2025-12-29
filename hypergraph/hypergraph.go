@@ -96,7 +96,7 @@ func (hg *HypergraphCRDT) publishSnapshot(root []byte) {
 	if hg.store == nil || hg.snapshotMgr == nil {
 		return
 	}
-	hg.logger.Debug("publishing snapshot")
+	// hg.logger.Debug("publishing snapshot")
 	hg.snapshotMgr.publish(root)
 }
 
