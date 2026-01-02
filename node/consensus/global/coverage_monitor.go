@@ -191,13 +191,13 @@ func (c *CoverageMonitor) checkShardCoverage(
 			size = size.Add(size, new(big.Int).SetUint64(metadata.TotalSize))
 		}
 
-		c.logger.Debug(
-			"checking shard coverage",
-			zap.String("shard_address", hex.EncodeToString([]byte(shardAddress))),
-			zap.Uint64("prover_count", proverCount),
-			zap.Uint64("attested_storage", attestedStorage),
-			zap.Uint64("shard_size", size.Uint64()),
-		)
+		// c.logger.Debug(
+		// 	"checking shard coverage",
+		// 	zap.String("shard_address", hex.EncodeToString([]byte(shardAddress))),
+		// 	zap.Uint64("prover_count", proverCount),
+		// 	zap.Uint64("attested_storage", attestedStorage),
+		// 	zap.Uint64("shard_size", size.Uint64()),
+		// )
 
 		// Check for critical coverage (halt condition)
 		if proverCount <= c.haltThreshold && size.Cmp(big.NewInt(0)) > 0 {
@@ -618,7 +618,7 @@ func (c *CoverageMonitor) findSiblingShards(
 		}
 	}
 
-	c.logger.Debug(
+	e.logger.Debug(
 		"found sibling shards",
 		zap.String("app_prefix", hex.EncodeToString(appPrefix)),
 		zap.Int("sibling_count", len(siblings)),
