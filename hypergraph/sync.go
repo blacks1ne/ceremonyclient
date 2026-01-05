@@ -250,15 +250,15 @@ func (hg *HypergraphCRDT) Sync(
 		},
 	}
 
-	responseSendStart := time.Now()
+	// responseSendStart := time.Now()
 	if err := stream.Send(resp); err != nil {
 		return nil, err
 	}
-	hg.logger.Debug(
-		"sent initial branch info",
-		zap.String("shard_key", shardKeyHex),
-		zap.Duration("duration", time.Since(responseSendStart)),
-	)
+	// hg.logger.Debug(
+	// 	"sent initial branch info",
+	// 	zap.String("shard_key", shardKeyHex),
+	// 	zap.Duration("duration", time.Since(responseSendStart)),
+	// )
 
 	ctx, cancel := context.WithCancel(stream.Context())
 
