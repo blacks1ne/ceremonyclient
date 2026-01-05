@@ -191,13 +191,13 @@ func (c *CoverageMonitor) checkShardCoverage(
 			size = size.Add(size, new(big.Int).SetUint64(metadata.TotalSize))
 		}
 
-		// c.logger.Debug(
-		// 	"checking shard coverage",
-		// 	zap.String("shard_address", hex.EncodeToString([]byte(shardAddress))),
-		// 	zap.Uint64("prover_count", proverCount),
-		// 	zap.Uint64("attested_storage", attestedStorage),
-		// 	zap.Uint64("shard_size", size.Uint64()),
-		// )
+		//		c.logger.Debug(
+		//			"checking shard coverage",
+		//			zap.String("shard_address", hex.EncodeToString([]byte(shardAddress))),
+		//			zap.Uint64("prover_count", proverCount),
+		//			zap.Uint64("attested_storage", attestedStorage),
+		//			zap.Uint64("shard_size", size.Uint64()),
+		//		)
 
 		// Check for critical coverage (halt condition)
 		if proverCount <= c.haltThreshold && size.Cmp(big.NewInt(0)) > 0 {
@@ -444,12 +444,12 @@ func (c *CoverageMonitor) handleHighCoverage(
 			// Case 3.a.i: Split is possible
 			proposedShards := c.proposeShardSplit(shardAddress, coverage.ProverCount)
 
-			c.logger.Info(
-				"shard eligible for split",
-				zap.String("shard_address", hex.EncodeToString(shardAddress)),
-				zap.Int("prover_count", coverage.ProverCount),
-				zap.Int("proposed_shard_count", len(proposedShards)),
-			)
+			// e.logger.Info(
+			// 	"shard eligible for split",
+			// 	zap.String("shard_address", hex.EncodeToString(shardAddress)),
+			// 	zap.Int("prover_count", coverage.ProverCount),
+			// 	zap.Int("proposed_shard_count", len(proposedShards)),
+			// )
 
 			// Emit split eligible event
 			c.emitSplitEvent(&typesconsensus.ShardSplitEventData{
@@ -618,11 +618,11 @@ func (c *CoverageMonitor) findSiblingShards(
 		}
 	}
 
-	e.logger.Debug(
-		"found sibling shards",
-		zap.String("app_prefix", hex.EncodeToString(appPrefix)),
-		zap.Int("sibling_count", len(siblings)),
-	)
+	//	e.logger.Debug(
+	//		"found sibling shards",
+	//		zap.String("app_prefix", hex.EncodeToString(appPrefix)),
+	//		zap.Int("sibling_count", len(siblings)),
+	//	)
 
 	return siblings
 }
@@ -694,12 +694,12 @@ func (c *CoverageMonitor) proposeShardSplit(
 		}
 	}
 
-	c.logger.Debug(
-		"proposed shard split",
-		zap.String("original_shard", hex.EncodeToString(shardAddress)),
-		zap.Int("split_factor", splitFactor),
-		zap.Int("proposed_count", len(proposedShards)),
-	)
+	// e.logger.Debug(
+	// 	"proposed shard split",
+	// 	zap.String("original_shard", hex.EncodeToString(shardAddress)),
+	// 	zap.Int("split_factor", splitFactor),
+	// 	zap.Int("proposed_count", len(proposedShards)),
+	// )
 
 	return proposedShards
 }
