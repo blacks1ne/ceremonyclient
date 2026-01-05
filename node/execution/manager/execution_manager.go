@@ -3,7 +3,6 @@ package manager
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"math/big"
 	"slices"
 	"strings"
@@ -356,10 +355,10 @@ func (m *ExecutionEngineManager) ProcessMessage(
 	// Route to global engine for system messages
 	if bytes.Equal(address, intrinsics.GLOBAL_INTRINSIC_ADDRESS[:]) {
 		if engine, exists := m.engines["global"]; exists {
-			m.logger.Debug(
-				"routing message to global engine",
-				zap.String("address", hex.EncodeToString(address)),
-			)
+			// m.logger.Debug(
+			// 	"routing message to global engine",
+			// 	zap.String("address", hex.EncodeToString(address)),
+			// )
 
 			timer := prometheus.NewTimer(
 				executionRequestDuration.WithLabelValues("global"),
@@ -443,10 +442,10 @@ func (m *ExecutionEngineManager) ProcessMessage(
 	// Check compute domain
 	if bytes.Equal(route, compute.COMPUTE_INTRINSIC_DOMAIN[:]) {
 		if engine, exists := m.engines["compute"]; exists {
-			m.logger.Debug(
-				"routing message to compute engine",
-				zap.String("address", hex.EncodeToString(address)),
-			)
+			// m.logger.Debug(
+			// 	"routing message to compute engine",
+			// 	zap.String("address", hex.EncodeToString(address)),
+			// )
 
 			timer := prometheus.NewTimer(
 				executionRequestDuration.WithLabelValues("compute"),
@@ -477,10 +476,10 @@ func (m *ExecutionEngineManager) ProcessMessage(
 	// Check hypergraph domain
 	if bytes.Equal(route, hypergraphintrinsic.HYPERGRAPH_BASE_DOMAIN[:]) {
 		if engine, exists := m.engines["hypergraph"]; exists {
-			m.logger.Debug(
-				"routing message to hypergraph engine",
-				zap.String("address", hex.EncodeToString(address)),
-			)
+			// m.logger.Debug(
+			// 	"routing message to hypergraph engine",
+			// 	zap.String("address", hex.EncodeToString(address)),
+			// )
 
 			timer := prometheus.NewTimer(
 				executionRequestDuration.WithLabelValues("hypergraph"),
@@ -512,10 +511,10 @@ func (m *ExecutionEngineManager) ProcessMessage(
 	if bytes.Equal(route, token.TOKEN_BASE_DOMAIN[:]) ||
 		bytes.Equal(route, token.QUIL_TOKEN_ADDRESS[:]) {
 		if engine, exists := m.engines["token"]; exists {
-			m.logger.Debug(
-				"routing message to token engine",
-				zap.String("address", hex.EncodeToString(address)),
-			)
+			// m.logger.Debug(
+			// 	"routing message to token engine",
+			// 	zap.String("address", hex.EncodeToString(address)),
+			// )
 
 			timer := prometheus.NewTimer(
 				executionRequestDuration.WithLabelValues("token"),
