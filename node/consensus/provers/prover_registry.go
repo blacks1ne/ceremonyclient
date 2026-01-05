@@ -753,29 +753,29 @@ func (r *ProverRegistry) removeProverFromTrie(
 	var trie *tries.RollingFrecencyCritbitTrie
 	var filterStr string
 
-	r.logger.Debug(
-		"removing prover from trie",
-		zap.String("address", fmt.Sprintf("%x", address)),
-		zap.String("filter", fmt.Sprintf("%x", filter)),
-	)
+	// r.logger.Debug(
+	// 	"removing prover from trie",
+	// 	zap.String("address", fmt.Sprintf("%x", address)),
+	// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+	// )
 
 	if len(filter) == 0 {
 		trie = r.globalTrie
 		filterStr = ""
-		r.logger.Debug("removing from global trie")
+		// r.logger.Debug("removing from global trie")
 	} else {
 		filterStr = string(filter)
 		if shardTrie, exists := r.shardTries[filterStr]; exists {
 			trie = shardTrie
-			r.logger.Debug(
-				"removing from shard trie",
-				zap.String("filter", fmt.Sprintf("%x", filter)),
-			)
+			// r.logger.Debug(
+			// 	"removing from shard trie",
+			// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+			// )
 		} else {
-			r.logger.Debug(
-				"shard trie doesn't exist, nothing to remove",
-				zap.String("filter", fmt.Sprintf("%x", filter)),
-			)
+			// r.logger.Debug(
+			// 	"shard trie doesn't exist, nothing to remove",
+			// 	zap.String("filter", fmt.Sprintf("%x", filter)),
+			// )
 			return nil
 		}
 	}
