@@ -793,17 +793,17 @@ func (r *ProverRegistry) removeProverFromTrie(
 		}
 		if len(newFilters) > 0 {
 			r.addressToFilters[string(address)] = newFilters
-			r.logger.Debug(
-				"updated address filter tracking",
-				zap.String("address", fmt.Sprintf("%x", address)),
-				zap.Int("remaining_filters", len(newFilters)),
-			)
+			// r.logger.Debug(
+			// 	"updated address filter tracking",
+			// 	zap.String("address", fmt.Sprintf("%x", address)),
+			// 	zap.Int("remaining_filters", len(newFilters)),
+			// )
 		} else {
 			delete(r.addressToFilters, string(address))
-			r.logger.Debug(
-				"removed address from filter tracking",
-				zap.String("address", fmt.Sprintf("%x", address)),
-			)
+			// r.logger.Debug(
+			// 	"removed address from filter tracking",
+			// 	zap.String("address", fmt.Sprintf("%x", address)),
+			// )
 		}
 	}
 
