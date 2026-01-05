@@ -214,7 +214,7 @@ func (hg *HypergraphCRDT) Sync(
 	recvStart := time.Now()
 	msg, err := stream.Recv()
 	if err != nil {
-		hg.logger.Info("initial recv failed", zap.Error(err))
+		// hg.logger.Info("initial recv failed", zap.Error(err))
 		return nil, err
 	}
 	hg.logger.Debug(
