@@ -524,15 +524,15 @@ func (r *ProverRegistry) pruneAllocationVertex(
 		)
 		// Don't return error - the vertex may already be deleted
 	} else {
-		r.logger.Debug(
-			"deleted allocation vertex during prune",
-			zap.String("address", hex.EncodeToString(info.Address)),
-			zap.String(
-				"filter",
-				hex.EncodeToString(allocation.ConfirmationFilter),
-			),
-			zap.String("vertex_id", hex.EncodeToString(vertexID[:])),
-		)
+		// r.logger.Debug(
+		// 	"deleted allocation vertex during prune",
+		// 	zap.String("address", hex.EncodeToString(info.Address)),
+		// 	zap.String(
+		// 		"filter",
+		// 		hex.EncodeToString(allocation.ConfirmationFilter),
+		// 	),
+		// 	zap.String("vertex_id", hex.EncodeToString(vertexID[:])),
+		// )
 	}
 
 	return nil
