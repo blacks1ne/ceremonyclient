@@ -376,12 +376,12 @@ func (e *GlobalExecutionEngine) handleBundle(
 		responses.Messages = append(responses.Messages, opResponses.Messages...)
 	}
 
-	e.logger.Info(
-		"processed message bundle",
-		zap.Int("operations", len(bundle.Requests)),
-		zap.String("address", hex.EncodeToString(address)),
-		zap.Int("responses", len(responses.Messages)),
-	)
+	// e.logger.Info(
+	// 	"processed message bundle",
+	// 	zap.Int("operations", len(bundle.Requests)),
+	// 	zap.String("address", hex.EncodeToString(address)),
+	// 	zap.Int("responses", len(responses.Messages)),
+	// )
 
 	return responses, nil
 }
@@ -418,10 +418,10 @@ func (e *GlobalExecutionEngine) processIndividualMessage(
 		return nil, errors.Wrap(err, "process individual message")
 	}
 
-	e.logger.Debug(
-		"processed individual message",
-		zap.String("address", hex.EncodeToString(address)),
-	)
+	// e.logger.Debug(
+	// 	"processed individual message",
+	// 	zap.String("address", hex.EncodeToString(address)),
+	// )
 
 	return &execution.ProcessMessageResult{
 		Messages: []*protobufs.Message{},
