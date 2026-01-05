@@ -1785,10 +1785,10 @@ func (r *ProverRegistry) removeProver(proverAddress []byte) error {
 	// Remove from address to filters mapping
 	delete(r.addressToFilters, string(proverAddress))
 
-	r.logger.Debug(
-		"prover removed successfully",
-		zap.String("address", fmt.Sprintf("%x", proverAddress)),
-	)
+	// r.logger.Debug(
+	// 	"prover removed successfully",
+	// 	zap.String("address", fmt.Sprintf("%x", proverAddress)),
+	// )
 
 	return nil
 }
