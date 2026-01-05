@@ -229,7 +229,7 @@ func (hg *HypergraphCRDT) Sync(
 		)
 	}
 
-	branchInfoStart := time.Now()
+	// branchInfoStart := time.Now()
 	branchInfo, err := getBranchInfoFromTree(
 		hg.logger,
 		set.GetTree(),
@@ -238,11 +238,11 @@ func (hg *HypergraphCRDT) Sync(
 	if err != nil {
 		return nil, err
 	}
-	hg.logger.Debug(
-		"constructed branch info",
-		zap.String("shard_key", shardKeyHex),
-		zap.Duration("duration", time.Since(branchInfoStart)),
-	)
+	// hg.logger.Debug(
+	// 	"constructed branch info",
+	// 	zap.String("shard_key", shardKeyHex),
+	// 	zap.Duration("duration", time.Since(branchInfoStart)),
+	// )
 
 	resp := &protobufs.HypergraphComparison{
 		Payload: &protobufs.HypergraphComparison_Response{
