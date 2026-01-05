@@ -211,17 +211,17 @@ func (hg *HypergraphCRDT) Sync(
 	// )
 
 	// hg.logger.Debug("server waiting for initial query")
-	recvStart := time.Now()
+	// recvStart := time.Now()
 	msg, err := stream.Recv()
 	if err != nil {
 		// hg.logger.Info("initial recv failed", zap.Error(err))
 		return nil, err
 	}
-	hg.logger.Debug(
-		"received initialization response",
-		zap.String("shard_key", shardKeyHex),
-		zap.Duration("duration", time.Since(recvStart)),
-	)
+	// hg.logger.Debug(
+	// 	"received initialization response",
+	// 	zap.String("shard_key", shardKeyHex),
+	// 	zap.Duration("duration", time.Since(recvStart)),
+	// )
 	response := msg.GetResponse()
 	if response == nil {
 		return nil, errors.New(
