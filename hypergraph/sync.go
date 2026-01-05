@@ -189,7 +189,7 @@ func (hg *HypergraphCRDT) Sync(
 	}
 
 	// Send initial query for path
-	sendStart := time.Now()
+	// sendStart := time.Now()
 	if err := stream.Send(&protobufs.HypergraphComparison{
 		Payload: &protobufs.HypergraphComparison_Query{
 			Query: &protobufs.HypergraphComparisonQuery{
@@ -204,11 +204,11 @@ func (hg *HypergraphCRDT) Sync(
 	}); err != nil {
 		return nil, err
 	}
-	hg.logger.Debug(
-		"sent initialization message",
-		zap.String("shard_key", shardKeyHex),
-		zap.Duration("duration", time.Since(sendStart)),
-	)
+	// hg.logger.Debug(
+	// 	"sent initialization message",
+	// 	zap.String("shard_key", shardKeyHex),
+	// 	zap.Duration("duration", time.Since(sendStart)),
+	// )
 
 	// hg.logger.Debug("server waiting for initial query")
 	recvStart := time.Now()
