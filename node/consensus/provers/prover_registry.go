@@ -589,10 +589,10 @@ func (r *ProverRegistry) pruneProverRecord(
 		// )
 	}
 
-	r.logger.Debug(
-		"pruned prover record",
-		zap.String("address", hex.EncodeToString(info.Address)),
-	)
+	// r.logger.Debug(
+	// 	"pruned prover record",
+	// 	zap.String("address", hex.EncodeToString(info.Address)),
+	// )
 
 	return nil
 }
