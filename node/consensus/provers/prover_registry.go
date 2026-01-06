@@ -557,36 +557,36 @@ func (r *ProverRegistry) pruneProverRecord(
 	// Delete prover vertex using DeleteVertexAdd which properly handles locking
 	// and deletes both the tree entry and vertex data atomically
 	if err := r.hypergraph.DeleteVertexAdd(txn, shardKey, proverVertexID); err != nil {
-		r.logger.Debug(
-			"could not delete prover vertex during prune",
-			zap.String("address", hex.EncodeToString(info.Address)),
-			zap.String("vertex_id", hex.EncodeToString(proverVertexID[:])),
-			zap.Error(err),
-		)
+		// r.logger.Debug(
+		// 	"could not delete prover vertex during prune",
+		// 	zap.String("address", hex.EncodeToString(info.Address)),
+		// 	zap.String("vertex_id", hex.EncodeToString(proverVertexID[:])),
+		// 	zap.Error(err),
+		// )
 		// Don't return error - the vertex may already be deleted
 	} else {
-		r.logger.Debug(
-			"deleted prover vertex during prune",
-			zap.String("address", hex.EncodeToString(info.Address)),
-			zap.String("vertex_id", hex.EncodeToString(proverVertexID[:])),
-		)
+		// r.logger.Debug(
+		// 	"deleted prover vertex during prune",
+		// 	zap.String("address", hex.EncodeToString(info.Address)),
+		// 	zap.String("vertex_id", hex.EncodeToString(proverVertexID[:])),
+		// )
 	}
 
 	// Delete prover hyperedge using DeleteHyperedgeAdd
 	if err := r.hypergraph.DeleteHyperedgeAdd(txn, shardKey, proverVertexID); err != nil {
-		r.logger.Debug(
-			"could not delete prover hyperedge during prune",
-			zap.String("address", hex.EncodeToString(info.Address)),
-			zap.String("hyperedge_id", hex.EncodeToString(proverVertexID[:])),
-			zap.Error(err),
-		)
+		// r.logger.Debug(
+		// 	"could not delete prover hyperedge during prune",
+		// 	zap.String("address", hex.EncodeToString(info.Address)),
+		// 	zap.String("hyperedge_id", hex.EncodeToString(proverVertexID[:])),
+		// 	zap.Error(err),
+		// )
 		// Don't return error - the hyperedge may already be deleted
 	} else {
-		r.logger.Debug(
-			"deleted prover hyperedge during prune",
-			zap.String("address", hex.EncodeToString(info.Address)),
-			zap.String("hyperedge_id", hex.EncodeToString(proverVertexID[:])),
-		)
+		// r.logger.Debug(
+		// 	"deleted prover hyperedge during prune",
+		// 	zap.String("address", hex.EncodeToString(info.Address)),
+		// 	zap.String("hyperedge_id", hex.EncodeToString(proverVertexID[:])),
+		// )
 	}
 
 	r.logger.Debug(
