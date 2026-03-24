@@ -1980,15 +1980,15 @@ func (e *GlobalConsensusEngine) handleShardLivenessCheck(message *pb.Message) {
 	}
 
 	if found == nil {
-		e.logger.Debug(
-			"invalid liveness check",
-			zap.String(
-				"prover",
-				hex.EncodeToString(
-					livenessCheck.PublicKeySignatureBls48581.Address,
-				),
-			),
-		)
+		// e.logger.Warn(
+		// 	"invalid liveness check",
+		// 	zap.String(
+		// 		"prover",
+		// 		hex.EncodeToString(
+		// 			livenessCheck.PublicKeySignatureBls48581.Address,
+		// 		),
+		// 	),
+		// )
 		shardLivenessCheckProcessedTotal.WithLabelValues("error").Inc()
 		return
 	}
