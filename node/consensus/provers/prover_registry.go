@@ -141,10 +141,10 @@ func (r *ProverRegistry) GetProverInfo(
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	r.logger.Debug(
-		"getting prover info",
-		zap.String("address", fmt.Sprintf("%x", address)),
-	)
+	// r.logger.Debug(
+	// 	"getting prover info",
+	// 	zap.String("address", fmt.Sprintf("%x", address)),
+	// )
 
 	if info, exists := r.proverCache[string(address)]; exists {
 		return copyProverInfo(info), nil
@@ -164,14 +164,14 @@ func copyProverInfo(info *consensus.ProverInfo) *consensus.ProverInfo {
 		return nil
 	}
 	cp := &consensus.ProverInfo{
-		PublicKey:         make([]byte, len(info.PublicKey)),
-		Address:           make([]byte, len(info.Address)),
-		Status:            info.Status,
-		KickFrameNumber:   info.KickFrameNumber,
-		AvailableStorage:  info.AvailableStorage,
-		Seniority:         info.Seniority,
-		DelegateAddress:   make([]byte, len(info.DelegateAddress)),
-		Allocations:       make([]consensus.ProverAllocationInfo, len(info.Allocations)),
+		PublicKey:        make([]byte, len(info.PublicKey)),
+		Address:          make([]byte, len(info.Address)),
+		Status:           info.Status,
+		KickFrameNumber:  info.KickFrameNumber,
+		AvailableStorage: info.AvailableStorage,
+		Seniority:        info.Seniority,
+		DelegateAddress:  make([]byte, len(info.DelegateAddress)),
+		Allocations:      make([]consensus.ProverAllocationInfo, len(info.Allocations)),
 	}
 	copy(cp.PublicKey, info.PublicKey)
 	copy(cp.Address, info.Address)
