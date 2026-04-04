@@ -231,10 +231,10 @@ func (
 		result = append(result, capability)
 	}
 
-	m.logger.Info("collected unique capabilities",
-		zap.Int("total_unique", len(result)),
-		zap.Int("engines_queried", len(m.engines)),
-	)
+	// m.logger.Info("collected unique capabilities",
+	// 	zap.Int("total_unique", len(result)),
+	// 	zap.Int("engines_queried", len(m.engines)),
+	// )
 
 	return result
 }
