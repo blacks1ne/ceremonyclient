@@ -207,10 +207,10 @@ func (m *snapshotManager) publish(root []byte) {
 	// original correct one get mismatched data and fail to converge.
 	for _, gen := range m.generations {
 		if bytes.Equal(gen.root, root) {
-			m.logger.Debug(
-				"publish called with existing root, no change",
-				zap.String("root", rootHex),
-			)
+			// m.logger.Debug(
+			// 	"publish called with existing root, no change",
+			// 	zap.String("root", rootHex),
+			// )
 			return
 		}
 	}
@@ -265,21 +265,21 @@ func (m *snapshotManager) publish(root []byte) {
 			}
 		}
 
-		oldRootHex := ""
-		if len(oldGen.root) != 0 {
-			oldRootHex = hex.EncodeToString(oldGen.root)
-		}
-		m.logger.Debug(
-			"released old snapshot generation",
-			zap.String("root", oldRootHex),
-		)
+		// oldRootHex := ""
+		// if len(oldGen.root) != 0 {
+		// 	oldRootHex = hex.EncodeToString(oldGen.root)
+		// }
+		// m.logger.Debug(
+		// 	"released old snapshot generation",
+		// 	zap.String("root", oldRootHex),
+		// )
 	}
 
-	m.logger.Debug(
-		"published new snapshot generation",
-		zap.String("root", rootHex),
-		zap.Int("total_generations", len(m.generations)),
-	)
+	// m.logger.Debug(
+	// 	"published new snapshot generation",
+	// 	zap.String("root", rootHex),
+	// 	zap.Int("total_generations", len(m.generations)),
+	// )
 }
 
 // acquire returns a snapshot handle for the given shard key. If expectedRoot
@@ -311,10 +311,10 @@ func (m *snapshotManager) acquire(
 			if bytes.Equal(gen.root, expectedRoot) {
 				// Found matching generation, check if it has a snapshot for this shard
 				if handle, ok := gen.handles[key]; ok {
-					m.logger.Debug(
-						"found existing snapshot for expected root",
-						zap.String("expected_root", hex.EncodeToString(expectedRoot)),
-					)
+					// m.logger.Debug(
+					// 	"found existing snapshot for expected root",
+					// 	zap.String("expected_root", hex.EncodeToString(expectedRoot)),
+					// )
 					handle.acquire()
 					return handle
 				}
@@ -322,10 +322,10 @@ func (m *snapshotManager) acquire(
 				// If we have a DB snapshot, we can create from it even for older generations.
 				if gen.dbSnapshot != nil {
 					targetGen = gen
-					m.logger.Debug(
-						"creating snapshot for expected root from DB snapshot",
-						zap.String("expected_root", hex.EncodeToString(expectedRoot)),
-					)
+					// m.logger.Debug(
+					// 	"creating snapshot for expected root from DB snapshot",
+					// 	zap.String("expected_root", hex.EncodeToString(expectedRoot)),
+					// )
 					break
 				}
 				// No DB snapshot - only allow if this is the latest generation
@@ -337,10 +337,10 @@ func (m *snapshotManager) acquire(
 					return nil
 				}
 				targetGen = gen
-				m.logger.Debug(
-					"creating snapshot for expected root (latest generation, no DB snapshot)",
-					zap.String("expected_root", hex.EncodeToString(expectedRoot)),
-				)
+				// m.logger.Debug(
+				// 	"creating snapshot for expected root (latest generation, no DB snapshot)",
+				// 	zap.String("expected_root", hex.EncodeToString(expectedRoot)),
+				// )
 				break
 			}
 		}
