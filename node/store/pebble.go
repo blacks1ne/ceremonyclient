@@ -325,21 +325,21 @@ func (p *PebbleDB) migrate(logger *zap.Logger) error {
 
 	batch := p.db.NewIndexedBatch()
 	for i := int(storedVersion); i < len(pebbleMigrations); i++ {
-		logger.Warn(
-			"performing pebble store migration",
-			zap.Int("from_version", int(storedVersion)),
-			zap.Int("to_version", int(storedVersion+1)),
-		)
+		// logger.Warn(
+		// 	"performing pebble store migration",
+		// 	zap.Int("from_version", int(storedVersion)),
+		// 	zap.Int("to_version", int(storedVersion+1)),
+		// )
 		if err := pebbleMigrations[i](batch, p.db, p.config); err != nil {
 			batch.Close()
 			logger.Error("migration failed", zap.Error(err))
 			return errors.Wrapf(err, "apply migration %d", i+1)
 		}
-		logger.Info(
-			"migration step completed",
-			zap.Int("from_version", int(storedVersion)),
-			zap.Int("to_version", int(storedVersion+1)),
-		)
+		// logger.Info(
+		// 	"migration step completed",
+		// 	zap.Int("from_version", int(storedVersion)),
+		// 	zap.Int("to_version", int(storedVersion+1)),
+		// )
 	}
 
 	var versionBuf [8]byte
@@ -2427,9 +2427,9 @@ func doMigration223(db *pebble.DB, cfg *config.Config) error {
 		tree     *tries.VectorCommitmentTree
 	}
 
-	leftProvers := map[string]*proverInfo{}      // keyed by prover address (vertexID[32:64])
-	allocsByProver := map[string][]allocInfo{}    // keyed by prover reference
-	var kickedAllocs []*kickedAllocInfo           // allocations needing KickFrameNumber cleared
+	leftProvers := map[string]*proverInfo{}    // keyed by prover address (vertexID[32:64])
+	allocsByProver := map[string][]allocInfo{} // keyed by prover reference
+	var kickedAllocs []*kickedAllocInfo        // allocations needing KickFrameNumber cleared
 
 	iter := hgCRDT.GetVertexDataIterator(globalIntrinsicAddress)
 
