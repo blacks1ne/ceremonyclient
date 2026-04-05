@@ -1399,6 +1399,7 @@ func (r *ProverRegistry) processProverChange(
 					mappedStatus = consensus.ProverStatusLeaving
 				case 4:
 					// Left status - remove from registry
+					r.logger.Debug("left status - remove from registry")
 					return r.removeProver(proverAddress)
 				default:
 					mappedStatus = consensus.ProverStatusUnknown
@@ -1745,6 +1746,7 @@ func (r *ProverRegistry) processProverChange(
 
 	case state.DeleteStateChangeEvent:
 		// A prover was deleted
+		r.logger.Debug("prover was deleted")
 		return r.removeProver(proverAddress)
 	}
 
@@ -2194,6 +2196,7 @@ func (r *ProverRegistry) EvictInactiveProvers(
 	if len(evicted) > 0 {
 		r.mu.Lock()
 		for _, addr := range evicted {
+			r.logger.Debug("removing evicted prover")
 			r.removeProver(addr)
 		}
 		r.mu.Unlock()
