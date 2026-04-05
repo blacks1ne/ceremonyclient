@@ -3,8 +3,10 @@ package global
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"math/big"
 	"slices"
+	"strconv"
 
 	"github.com/iden3/go-iden3-crypto/poseidon"
 	"github.com/pkg/errors"
@@ -488,7 +490,10 @@ func (p *ProverReject) Verify(frameNumber uint64) (bool, error) {
 				if framesSinceJoin > 720 {
 					return false, errors.Wrap(
 						errors.New("join already implicitly rejected after 720 frames"),
-						"verify: invalid prover reject",
+						"verify: invalid prover reject for joinFrame ["+strconv.FormatUint(joinFrame, 10)+
+							"], frameNumber ["+strconv.FormatUint(frameNumber, 10)+"], p.FrameNumber ["+strconv.FormatUint(p.FrameNumber, 10)+
+							"], framesSinceJoin ["+strconv.FormatUint(framesSinceJoin, 10)+"] and allocation ["+
+							hex.EncodeToString(filter)+"]",
 					)
 				}
 			}
@@ -509,7 +514,10 @@ func (p *ProverReject) Verify(frameNumber uint64) (bool, error) {
 			if framesSinceLeave > 720 {
 				return false, errors.Wrap(
 					errors.New("leave already implicitly confirmed after 720 frames"),
-					"verify: invalid prover reject",
+					"verify: invalid prover rejectfor joinFrame ["+strconv.FormatUint(leaveFrame, 10)+
+						"], frameNumber ["+strconv.FormatUint(frameNumber, 10)+"], p.FrameNumber ["+strconv.FormatUint(p.FrameNumber, 10)+
+						"], framesSinceJoin ["+strconv.FormatUint(framesSinceLeave, 10)+"] and allocation ["+
+						hex.EncodeToString(filter)+"]",
 				)
 			}
 		}
