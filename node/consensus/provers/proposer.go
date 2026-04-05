@@ -582,9 +582,11 @@ func (m *Manager) PlanLeaves(
 
 	// Find best unallocated score.
 	var bestUnallocatedScore *big.Int
+	var bestUnallocatedScoreFilter string
 	for _, sc := range unallocatedScores {
 		if bestUnallocatedScore == nil || sc.score.Cmp(bestUnallocatedScore) > 0 {
 			bestUnallocatedScore = sc.score
+			bestUnallocatedScoreFilter = hex.EncodeToString(unallocatedShards[sc.idx].Filter)
 		}
 	}
 
@@ -638,7 +640,8 @@ func (m *Manager) PlanLeaves(
 		copy(fc, candidates[i].filter)
 		filters = append(filters, fc)
 		m.logger.Debug("added shard to leave list", zap.String("shard", hex.EncodeToString(fc)),
-			zap.String("score", candidates[i].score.String()), zap.String("leaveThreashold", leaveThreshold.String()))
+			zap.String("score", candidates[i].score.String()), zap.String("leaveThreashold", leaveThreshold.String()),
+			zap.String("bestUnallocScore", bestUnallocatedScore.String()), zap.String("bestUnallocScoreFilter", bestUnallocatedScoreFilter))
 	}
 
 	err = m.workerMgr.ProposeLeave(filters)
