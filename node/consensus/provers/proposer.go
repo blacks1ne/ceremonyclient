@@ -430,12 +430,14 @@ func (m *Manager) DecideJoins(
 	}
 	byHex := make(map[string]srec, len(shards))
 	var bestScore *big.Int
+	var bestScoreFilter string
 	for _, sc := range scores {
 		s := shards[sc.idx]
 		key := hex.EncodeToString(s.Filter)
 		byHex[key] = srec{desc: s, score: sc.score}
 		if bestScore == nil || sc.score.Cmp(bestScore) > 0 {
 			bestScore = sc.score
+			bestScoreFilter = key
 		}
 	}
 
@@ -500,14 +502,16 @@ func (m *Manager) DecideJoins(
 			copy(pc, p)
 			reject = append(reject, pc)
 			m.logger.Debug("added shard to join reject list", zap.String("shard", hex.EncodeToString(p)),
-				zap.String("score", rec.score.String()), zap.String("threashold", rejectThreshold.String()))
+				zap.String("score", rec.score.String()), zap.String("threashold", rejectThreshold.String()),
+				zap.String("bestScore", bestScore.String()), zap.String("bestScoreFilter", bestScoreFilter))
 		} else {
 			// Otherwise confirm - score is within acceptable range of best
 			pc := make([]byte, len(p))
 			copy(pc, p)
 			confirm = append(confirm, pc)
 			m.logger.Debug("added shard to join confirm list", zap.String("shard", hex.EncodeToString(p)),
-				zap.String("score", rec.score.String()), zap.String("threashold", rejectThreshold.String()))
+				zap.String("score", rec.score.String()), zap.String("threashold", rejectThreshold.String()),
+				zap.String("bestScore", bestScore.String()), zap.String("bestScoreFilter", bestScoreFilter))
 		}
 	}
 
