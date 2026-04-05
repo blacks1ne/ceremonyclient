@@ -427,7 +427,7 @@ func (p *ProverResume) Verify(frameNumber uint64) (bool, error) {
 	pauseFrame := binary.BigEndian.Uint64(pauseFrameBytes)
 
 	// Check if pause has timed out (360 frames)
-	framesSincePause := frameNumber - pauseFrame
+	framesSincePause := p.FrameNumber - pauseFrame
 	if framesSincePause > 360 {
 		return false, errors.Wrap(
 			errors.New("pause timeout exceeded, allocation has implicitly left"),

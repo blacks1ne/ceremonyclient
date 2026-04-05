@@ -527,7 +527,7 @@ func (p *ProverConfirm) Verify(frameNumber uint64) (bool, error) {
 			// ignore the topic altogether
 			if joinFrame >= (token.FRAME_2_1_EXTENDED_ENROLL_END-360) ||
 				joinFrame <= 244100 {
-				framesSinceJoin := frameNumber - joinFrame
+				framesSinceJoin := p.FrameNumber - joinFrame
 				if framesSinceJoin < 360 {
 					return false, errors.Wrap(
 						fmt.Errorf(
@@ -558,7 +558,7 @@ func (p *ProverConfirm) Verify(frameNumber uint64) (bool, error) {
 			}
 			leaveFrame := binary.BigEndian.Uint64(leaveFrameBytes)
 
-			framesSinceLeave := frameNumber - leaveFrame
+			framesSinceLeave := p.FrameNumber - leaveFrame
 			if framesSinceLeave < 360 {
 				return false, errors.Wrap(
 					errors.New("must wait 360 frames after leave to confirm"),

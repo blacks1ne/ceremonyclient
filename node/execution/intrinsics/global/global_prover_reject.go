@@ -486,7 +486,7 @@ func (p *ProverReject) Verify(frameNumber uint64) (bool, error) {
 			// Special case: if join was before frame 255840, can reject any time
 			if joinFrame >= token.FRAME_2_1_EXTENDED_ENROLL_END {
 				// Otherwise same timing constraints as confirm
-				framesSinceJoin := frameNumber - joinFrame
+				framesSinceJoin := p.FrameNumber - joinFrame
 				if framesSinceJoin > 720 {
 					return false, errors.Wrap(
 						errors.New("join already implicitly rejected after 720 frames"),
@@ -510,7 +510,7 @@ func (p *ProverReject) Verify(frameNumber uint64) (bool, error) {
 			}
 			leaveFrame := binary.BigEndian.Uint64(leaveFrameBytes)
 
-			framesSinceLeave := frameNumber - leaveFrame
+			framesSinceLeave := p.FrameNumber - leaveFrame
 			if framesSinceLeave > 720 {
 				return false, errors.Wrap(
 					errors.New("leave already implicitly confirmed after 720 frames"),
