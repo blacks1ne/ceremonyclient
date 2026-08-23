@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tracing::{debug, info, warn};
 
 use quil_types::consensus::{
@@ -9,6 +10,37 @@ use quil_types::consensus::{
 use quil_types::crypto::{BlsConstructor, FrameProver};
 use quil_types::error::{QuilError, Result};
 use quil_types::proto::global::{AppShardFrame, GlobalFrame, GlobalFrameHeader};
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Fingerprint the exact canonical committee material reconstructed locally.
+/// Public-key ordering from the registry is not part of the certificate's
+/// contract; Commonware sorts it into a `Set`, so sort before hashing as well.
+fn committee_fingerprint(committee_pubkeys: &[Vec<u8>]) -> String {
+    let mut keys: Vec<&[u8]> = committee_pubkeys.iter().map(Vec::as_slice).collect();
+    keys.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"quil-app-cw-committee-v1");
+    for key in keys {
+        hasher.update((key.len() as u32).to_be_bytes());
+        hasher.update(key);
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Per-member short fingerprints give archive operators a compact, ordered set
+/// comparison without dumping public keys into every retry log.
+fn committee_member_fingerprints(committee_pubkeys: &[Vec<u8>]) -> String {
+    let mut fingerprints: Vec<String> = committee_pubkeys
+        .iter()
+        .map(|key| sha256_hex(key)[..12].to_owned())
+        .collect();
+    fingerprints.sort_unstable();
+    fingerprints.join(",")
+}
 
 /// Validates received global frames by verifying VDF proof and BLS signature.
 pub struct GlobalFrameVerifier {
@@ -52,12 +84,23 @@ pub fn global_frame_body_matches_requests_root(
 
 impl GlobalFrameVerifier {
     pub fn new(frame_prover: Arc<dyn FrameProver>) -> Self {
-        Self { frame_prover, bls_constructor: None, global_committee: Vec::new() }
+        Self {
+            frame_prover,
+            bls_constructor: None,
+            global_committee: Vec::new(),
+        }
     }
 
     /// Create with BLS signature verification enabled.
-    pub fn with_bls(frame_prover: Arc<dyn FrameProver>, bls_constructor: Arc<dyn BlsConstructor>) -> Self {
-        Self { frame_prover, bls_constructor: Some(bls_constructor), global_committee: Vec::new() }
+    pub fn with_bls(
+        frame_prover: Arc<dyn FrameProver>,
+        bls_constructor: Arc<dyn BlsConstructor>,
+    ) -> Self {
+        Self {
+            frame_prover,
+            bls_constructor: Some(bls_constructor),
+            global_committee: Vec::new(),
+        }
     }
 
     /// Attach the fixed global committee so CW finalization certs are verified.
@@ -166,8 +209,8 @@ impl GlobalFrameVerifier {
                 .as_ref()
                 .and_then(|s| quil_cw_consensus::app_cert::unwrap_cert_from_header(&s.signature))
             {
-                let output_digest = quil_crypto::poseidon::hash_bytes_to_32(&header.output)
-                    .unwrap_or_default();
+                let output_digest =
+                    quil_crypto::poseidon::hash_bytes_to_32(&header.output).unwrap_or_default();
                 if quil_cw_consensus::app_cert::verify_finalization(
                     cert,
                     &self.global_committee,
@@ -182,7 +225,10 @@ impl GlobalFrameVerifier {
                     );
                     return Ok(false);
                 }
-                debug!(frame = header.frame_number, "global CW finalization cert verified");
+                debug!(
+                    frame = header.frame_number,
+                    "global CW finalization cert verified"
+                );
                 return Ok(true);
             }
         }
@@ -190,7 +236,8 @@ impl GlobalFrameVerifier {
         // Verify BLS aggregate signature if verifier is configured
         if let Some(ref bls) = self.bls_constructor {
             if let Some(ref agg_sig) = header.public_key_signature_bls48581 {
-                let pubkey_bytes = agg_sig.public_key
+                let pubkey_bytes = agg_sig
+                    .public_key
                     .as_ref()
                     .map(|pk| pk.key_value.clone())
                     .unwrap_or_default();
@@ -203,12 +250,17 @@ impl GlobalFrameVerifier {
                     // `String`, which would require valid UTF-8 — the
                     // raw poseidon bytes aren't, so we build the
                     // message manually here.
-                    let selector = quil_crypto::poseidon::hash_bytes_to_32(&header.output)
-                        .unwrap_or_default();
+                    let selector =
+                        quil_crypto::poseidon::hash_bytes_to_32(&header.output).unwrap_or_default();
                     let mut vote_msg = Vec::with_capacity(selector.len() + 8);
                     vote_msg.extend_from_slice(&selector);
                     vote_msg.extend_from_slice(&header.rank.to_be_bytes());
-                    if bls.verify_signature_raw(&pubkey_bytes, &agg_sig.signature, &vote_msg, b"global") {
+                    if bls.verify_signature_raw(
+                        &pubkey_bytes,
+                        &agg_sig.signature,
+                        &vote_msg,
+                        b"global",
+                    ) {
                         debug!(frame = header.frame_number, "BLS signature valid");
                     } else {
                         warn!(frame = header.frame_number, "BLS signature INVALID");
@@ -260,11 +312,7 @@ impl FramePipeline {
     pub fn process_raw_frame(&self, data: &[u8]) -> Result<u64> {
         // 1. Decode
         let frame = GlobalFrameVerifier::decode_frame(data)?;
-        let frame_number = frame
-            .header
-            .as_ref()
-            .map(|h| h.frame_number)
-            .unwrap_or(0);
+        let frame_number = frame.header.as_ref().map(|h| h.frame_number).unwrap_or(0);
 
         // 2. Validate header fields
         if let Some(header) = &frame.header {
@@ -419,7 +467,9 @@ impl GlobalFrameValidator for BlsGlobalFrameValidator {
         // Go uses `proverRegistry.GetActiveProvers(nil)` for the
         // global filter case, which for our Rust impl means an
         // empty byte slice.
-        let active = self.prover_registry.get_active_provers(&[], header.frame_number)?;
+        let active = self
+            .prover_registry
+            .get_active_provers(&[], header.frame_number)?;
         let mut active_public_keys: Vec<&[u8]> = Vec::new();
         let mut throwaway: Vec<&[u8]> = Vec::new();
         for (i, prover) in active.iter().enumerate() {
@@ -444,9 +494,7 @@ impl GlobalFrameValidator for BlsGlobalFrameValidator {
                 actual = %hex::encode(&aggregate.public_key),
                 "could not verify aggregated keys"
             );
-            return Err(QuilError::Crypto(
-                "could not verify aggregated keys".into(),
-            ));
+            return Err(QuilError::Crypto("could not verify aggregated keys".into()));
         }
 
         // 3. BLS signature verification. The aggregate-key check
@@ -532,10 +580,7 @@ impl BlsAppFrameValidator {
 
     /// Attach a clock store so storage attestations can be verified (supplies
     /// the global VDF output for the per-frame beacon).
-    pub fn with_clock_store(
-        mut self,
-        clock_store: Arc<dyn quil_types::store::ClockStore>,
-    ) -> Self {
+    pub fn with_clock_store(mut self, clock_store: Arc<dyn quil_types::store::ClockStore>) -> Self {
         self.clock_store = Some(clock_store);
         self
     }
@@ -743,17 +788,56 @@ impl BlsAppFrameValidator {
             namespace.extend_from_slice(&header.address);
             let output_digest = quil_crypto::poseidon::hash_bytes_to_32(&header.output)
                 .map_err(|e| QuilError::Crypto(format!("cw cert: poseidon(output): {e}")))?;
-            if quil_cw_consensus::app_cert::verify_finalization(
+            if let Err(reason) = quil_cw_consensus::app_cert::verify_finalization_detailed(
                 cert_bytes,
                 &committee_pubkeys,
                 &namespace,
                 output_digest,
-            )
-            .is_none()
-            {
-                return Err(QuilError::InvalidSignature(
-                    "app shard frame CW finalization cert verification failed".into(),
-                ));
+            ) {
+                // The certificate has only signer *indices*, so a later
+                // archive-side investigation needs an unambiguous description
+                // of both artifacts we combined here.  Do not emit raw certs
+                // or public keys into the journal: SHA-256 fingerprints are
+                // enough for archive operators to compare their records.
+                let certificate_sha256 = sha256_hex(cert_bytes);
+                let committee_fingerprint = committee_fingerprint(&committee_pubkeys);
+                let member_fingerprints = committee_member_fingerprints(&committee_pubkeys);
+                let decode_evidence = if matches!(
+                    &reason,
+                    quil_cw_consensus::app_cert::FinalizationVerificationError::DecodeFailed { .. }
+                ) {
+                    quil_cw_consensus::app_cert::inspect_finalization_decodes(
+                        cert_bytes,
+                        output_digest,
+                        1..=128,
+                    )
+                } else {
+                    quil_cw_consensus::app_cert::inspect_finalization_decodes(
+                        cert_bytes,
+                        output_digest,
+                        committee_pubkeys.len()..=committee_pubkeys.len(),
+                    )
+                };
+                let decode_evidence = decode_evidence
+                    .iter()
+                    .take(8)
+                    .map(|e| {
+                        format!(
+                            "n={}:signers={:?}:payload_match={}",
+                            e.committee_size, e.signer_indices, e.payload_matches_expected_digest
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                return Err(QuilError::InvalidSignature(format!(
+                    "app shard frame CW finalization cert verification failed: {reason}; \
+                         reconstructed_committee_size={}; certificate_sha256={certificate_sha256}; \
+                         output_digest={}; committee_fingerprint={committee_fingerprint}; \
+                         committee_member_sha256_12={member_fingerprints}; \
+                         decode_evidence=[{decode_evidence}]",
+                    committee_pubkeys.len(),
+                    hex::encode(output_digest),
+                )));
             }
         } else if let Some(sig) = header.public_key_signature_bls48581.as_ref() {
             let Some(pk) = sig.public_key.as_ref() else {
@@ -775,16 +859,18 @@ impl BlsAppFrameValidator {
             } else {
                 header.frame_number // genesis/legacy: no anchor, epoch 0 either way
             };
-            let active = self.prover_registry.get_active_provers(&header.address, committee_frame)?;
+            let active = self
+                .prover_registry
+                .get_active_provers(&header.address, committee_frame)?;
 
             // Generate a throwaway key pair once — Go does this via
             // `blsConstructor.New()`. The throwaway signature bytes
             // are used as placeholder signatures in the aggregation
             // call because it only consumes them to derive keys.
-            let (_throwaway_signer, throwaway_public) =
-                self.bls_constructor
-                    .new_key()
-                    .map_err(|e| QuilError::Crypto(format!("throwaway key: {}", e)))?;
+            let (_throwaway_signer, throwaway_public) = self
+                .bls_constructor
+                .new_key()
+                .map_err(|e| QuilError::Crypto(format!("throwaway key: {}", e)))?;
 
             let mut active_public_keys: Vec<&[u8]> = Vec::new();
             let mut throwaway_list: Vec<&[u8]> = Vec::new();
@@ -808,9 +894,7 @@ impl BlsAppFrameValidator {
                     bitmask = %hex::encode(&sig.bitmask),
                     "could not verify aggregated keys"
                 );
-                return Err(QuilError::Crypto(
-                    "could not verify aggregated keys".into(),
-                ));
+                return Err(QuilError::Crypto("could not verify aggregated keys".into()));
             }
 
             // BLS signature verification. See the matching comment in
@@ -858,55 +942,60 @@ impl BlsAppFrameValidator {
         // store is attached (the beacon source).
         if !header.storage_attestation_root.is_empty() {
             if let Some(clock_store) = self.clock_store.as_ref() {
-            let global = clock_store
-                .get_global_clock_frame(header.global_frame_number)
-                .map_err(|e| QuilError::Crypto(format!(
-                    "storage attestation: global frame {} unavailable: {}",
-                    header.global_frame_number, e
-                )))?;
-            let global_output = global
-                .header
-                .as_ref()
-                .map(|h| h.output.clone())
-                .unwrap_or_default();
-            let rho_n = quil_crypto::porep::derive_storage_beacon(
-                header.global_frame_number,
-                &global_output,
-            );
-            let active_epoch =
-                quil_types::consensus::epoch_for_frame(header.global_frame_number);
-            let attestation = frame.storage_attestation.clone().unwrap_or_default();
-            let bitmask = header
-                .public_key_signature_bls48581
-                .as_ref()
-                .map(|s| s.bitmask.clone())
-                .unwrap_or_default();
-            let registry = self.prover_registry.clone();
-            let ok = quil_crypto::porep::verify_frame_storage_attestation_registered(
-                &header.storage_attestation_root,
-                &attestation,
-                header.frame_number,
-                &rho_n,
-                &bitmask,
-                // Must match the poly_size every producer/audit/encode site
-                // uses (app_glue, app_shard_metadata, prover_pipeline,
-                // intrinsic reward audit). derive_challenge_index folds
-                // poly_size into both the challenge point and the modulus, so
-                // a mismatch here re-derives different points than the producer
-                // and rejects every storage-bearing frame. The crypto-layer
-                // sdr::BLOCK_POLY_SIZE (256) is the SDR block partition, NOT the
-                // consensus opening domain.
-                quil_types::consensus::STORAGE_BLOCK_POLY_SIZE,
-                active_epoch,
-                |member: &[u8], leaf_id: &[u8], epoch: u64| {
-                    registry.get_leaf_root(member, leaf_id, epoch).ok().flatten()
-                },
-            );
-            if !ok {
-                return Err(QuilError::Crypto(
-                    "app shard frame storage attestation rejected".into(),
-                ));
-            }
+                let global = clock_store
+                    .get_global_clock_frame(header.global_frame_number)
+                    .map_err(|e| {
+                        QuilError::Crypto(format!(
+                            "storage attestation: global frame {} unavailable: {}",
+                            header.global_frame_number, e
+                        ))
+                    })?;
+                let global_output = global
+                    .header
+                    .as_ref()
+                    .map(|h| h.output.clone())
+                    .unwrap_or_default();
+                let rho_n = quil_crypto::porep::derive_storage_beacon(
+                    header.global_frame_number,
+                    &global_output,
+                );
+                let active_epoch =
+                    quil_types::consensus::epoch_for_frame(header.global_frame_number);
+                let attestation = frame.storage_attestation.clone().unwrap_or_default();
+                let bitmask = header
+                    .public_key_signature_bls48581
+                    .as_ref()
+                    .map(|s| s.bitmask.clone())
+                    .unwrap_or_default();
+                let registry = self.prover_registry.clone();
+                let ok = quil_crypto::porep::verify_frame_storage_attestation_registered(
+                    &header.storage_attestation_root,
+                    &attestation,
+                    header.frame_number,
+                    &rho_n,
+                    &bitmask,
+                    // Must match the poly_size every producer/audit/encode site
+                    // uses (app_glue, app_shard_metadata, prover_pipeline,
+                    // intrinsic reward audit). derive_challenge_index folds
+                    // poly_size into both the challenge point and the modulus, so
+                    // a mismatch here re-derives different points than the producer
+                    // and rejects every storage-bearing frame. The crypto-layer
+                    // sdr::BLOCK_POLY_SIZE (256) is the SDR block partition, NOT the
+                    // consensus opening domain.
+                    quil_types::consensus::STORAGE_BLOCK_POLY_SIZE,
+                    active_epoch,
+                    |member: &[u8], leaf_id: &[u8], epoch: u64| {
+                        registry
+                            .get_leaf_root(member, leaf_id, epoch)
+                            .ok()
+                            .flatten()
+                    },
+                );
+                if !ok {
+                    return Err(QuilError::Crypto(
+                        "app shard frame storage attestation rejected".into(),
+                    ));
+                }
             } else {
                 // No beacon source (e.g. the archive-ingest validator): skip —
                 // the storage attestation is verified by full-frame holders on
@@ -947,6 +1036,17 @@ impl AppFrameValidator for BlsAppFrameValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committee_fingerprint_is_independent_of_registry_order() {
+        let first = vec![vec![0x02, 0x01], vec![0x03]];
+        let second = vec![vec![0x03], vec![0x02, 0x01]];
+        assert_eq!(committee_fingerprint(&first), committee_fingerprint(&second));
+        assert_eq!(
+            committee_member_fingerprints(&first),
+            committee_member_fingerprints(&second)
+        );
+    }
 
     #[test]
     fn global_frame_nil_header_rejected() {
@@ -1061,7 +1161,9 @@ mod tests {
             frame_number: 5,
             public_key_signature_bls48581: Some(Bls48581AggregateSignature {
                 signature: Vec::new(), // empty signature
-                public_key: Some(Bls48581g2PublicKey { key_value: vec![0x01u8; 96] }),
+                public_key: Some(Bls48581g2PublicKey {
+                    key_value: vec![0x01u8; 96],
+                }),
                 bitmask: vec![0x01],
             }),
             ..Default::default()
@@ -1088,7 +1190,9 @@ mod tests {
             frame_number: 5,
             public_key_signature_bls48581: Some(Bls48581AggregateSignature {
                 signature: vec![0xAAu8; 74],
-                public_key: Some(Bls48581g2PublicKey { key_value: vec![0x01u8; 96] }),
+                public_key: Some(Bls48581g2PublicKey {
+                    key_value: vec![0x01u8; 96],
+                }),
                 bitmask: Vec::new(), // empty bitmask
             }),
             ..Default::default()
@@ -1313,7 +1417,9 @@ mod tests {
             output: vec![0x01u8; 516],
             prover: vec![0x01u8; 32],
             public_key_signature_bls48581: Some(Bls48581AggregateSignature {
-                public_key: Some(Bls48581g2PublicKey { key_value: Vec::new() }),
+                public_key: Some(Bls48581g2PublicKey {
+                    key_value: Vec::new(),
+                }),
                 signature: vec![0xAAu8; 128],
                 bitmask: Vec::new(),
             }),
@@ -1378,20 +1484,10 @@ mod tests {
         fn new_key(&self) -> Result<(Box<dyn quil_types::crypto::Signer>, Vec<u8>)> {
             Err(QuilError::Internal("stub".into()))
         }
-        fn from_bytes(
-            &self,
-            _: &[u8],
-            _: &[u8],
-        ) -> Result<Box<dyn quil_types::crypto::Signer>> {
+        fn from_bytes(&self, _: &[u8], _: &[u8]) -> Result<Box<dyn quil_types::crypto::Signer>> {
             Err(QuilError::Internal("stub".into()))
         }
-        fn verify_signature_raw(
-            &self,
-            _: &[u8],
-            _: &[u8],
-            _: &[u8],
-            _: &[u8],
-        ) -> bool {
+        fn verify_signature_raw(&self, _: &[u8], _: &[u8], _: &[u8], _: &[u8]) -> bool {
             false
         }
         fn verify_multi_message_signature_raw(
