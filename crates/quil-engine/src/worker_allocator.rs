@@ -689,15 +689,25 @@ impl WorkerAllocator {
             .filter(|w| !w.filter.is_empty())
             .map(|w| w.filter.clone())
             .collect();
-        let unassigned_active_exists = prover_info
+        // Keep the candidates, rather than only a boolean, because this repair
+        // path is deliberately conservative only if the unbound allocation is
+        // demonstrably related to the stale worker.  The registry does not
+        // currently expose an explicit parent→child allocation link, so this
+        // diagnostic data is needed to establish whether a global orphan is
+        // incorrectly causing an unrelated worker to be released.
+        let unassigned_active_allocations: Vec<
+            &quil_types::consensus::ProverAllocationInfo,
+        > = prover_info
             .as_ref()
             .map(|p| p.allocations.as_slice())
             .unwrap_or(&[])
             .iter()
-            .any(|a| {
+            .filter(|a| {
                 a.status == ProverStatus::Active
                     && !bound_filters.contains(&a.confirmation_filter)
-            });
+            })
+            .collect();
+        let unassigned_active_exists = !unassigned_active_allocations.is_empty();
 
         for worker in &workers {
             if worker.filter.is_empty() {
@@ -768,9 +778,48 @@ impl WorkerAllocator {
                     && frame_number
                         <= worker.pending_filter_frame + PROPOSAL_TIMEOUT_FRAMES;
                 if !f_resolvable && !pending_in_flight {
+                    // `unassigned_active_exists` is global: without this
+                    // evidence it is impossible to tell whether the orphan
+                    // that triggered this cleanup is truly a split child of
+                    // this stale filter, or an unrelated allocation.  Raw
+                    // prefix matching is telemetry only; it is not treated as
+                    // a protocol-level parent/child assertion.
+                    let stale_allocation = alloc_by_filter.get(&worker.filter).copied();
+                    let unbound_active_count = unassigned_active_allocations.len();
+                    let unbound_active_sample: Vec<String> = unassigned_active_allocations
+                        .iter()
+                        .take(16)
+                        .map(|a| {
+                            format!(
+                                "filter={},join_frame={},epoch={},last_active_frame={}",
+                                hex::encode(&a.confirmation_filter),
+                                a.join_frame_number,
+                                a.epoch,
+                                a.last_active_frame_number,
+                            )
+                        })
+                        .collect();
+                    let raw_prefix_related_sample: Vec<String> =
+                        unassigned_active_allocations
+                            .iter()
+                            .filter(|a| {
+                                a.confirmation_filter.starts_with(&worker.filter)
+                                    || worker.filter.starts_with(&a.confirmation_filter)
+                            })
+                            .take(16)
+                            .map(|a| hex::encode(&a.confirmation_filter))
+                            .collect();
                     warn!(
                         core_id = worker.core_id,
                         stale_filter = hex::encode(&worker.filter),
+                        stale_allocation_present = stale_allocation.is_some(),
+                        stale_status = ?stale_allocation.map(|a| a.status),
+                        stale_effective_status = ?stale_allocation
+                            .map(|a| a.effective_status(frame_number)),
+                        worker_pending_filter_frame = worker.pending_filter_frame,
+                        unbound_active_count,
+                        ?unbound_active_sample,
+                        ?raw_prefix_related_sample,
                         "worker pinned to a filter with no active allocation while an \
                          active child allocation is unbound (likely split-parent) — \
                          deallocating so the child rebinds"
