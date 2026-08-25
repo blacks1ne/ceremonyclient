@@ -257,6 +257,15 @@ impl ProverPipeline {
                 });
             }
             LifecycleAction::ReconfirmEpoch { filters, frame_number } => {
+                let filter_count = filters.len();
+                let filter_sample: Vec<String> =
+                    filters.iter().take(16).map(hex::encode).collect();
+                info!(
+                    frame = frame_number,
+                    filter_count,
+                    ?filter_sample,
+                    "submitting epoch renewal for stale prover allocations"
+                );
                 let me = self.clone();
                 // TODO
                 tokio::spawn(async move {
@@ -269,6 +278,11 @@ impl ProverPipeline {
                         me.submit_confirm(filters, frame_number),
                     ).await {
                         Ok(Ok(())) => {
+                            info!(
+                                frame = frame_number,
+                                filter_count,
+                                "epoch renewal submitted successfully"
+                            );
                             // Only after the new-epoch replicas are persisted do
                             // we prune the stale ones — keep_from = the epoch we
                             // just (re)confirmed, dropping everything below it.

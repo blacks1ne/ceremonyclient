@@ -1247,9 +1247,33 @@ impl ProverLifecycle {
         // halts: a prover maintaining its own storage commitment is never the
         // cause of a halt and must not be evicted for one.
         if !expired_epoch_filters.is_empty() {
+            let expired_epoch_count = expired_epoch_filters.len();
+            let expired_epoch_sample: Vec<String> = expired_epoch_filters
+                .iter()
+                .take(16)
+                .map(hex::encode)
+                .collect();
             let to_reconfirm =
                 self.filter_recent_reconfirm_attempts(expired_epoch_filters, frame_number);
             if !to_reconfirm.is_empty() {
+                let reconfirm_count = to_reconfirm.len();
+                let reconfirm_sample: Vec<String> =
+                    to_reconfirm.iter().take(16).map(hex::encode).collect();
+                // Re-confirmation is prover-level, not worker-level: stale
+                // allocations intentionally have no consensus worker until
+                // the registry accepts their new epoch.  Record both sets so
+                // an operator can distinguish a capped/cooldown-suppressed
+                // renewal from an allocator failure to bind a renewed alloc.
+                info!(
+                    frame = frame_number,
+                    expired_epoch_count,
+                    reconfirm_count,
+                    free_worker_count = free_worker_ids.len(),
+                    ?free_worker_ids,
+                    ?expired_epoch_sample,
+                    ?reconfirm_sample,
+                    "scheduling epoch renewal for stale prover allocations"
+                );
                 self.record_reconfirm_attempts(&to_reconfirm, frame_number);
                 actions.push(LifecycleAction::ReconfirmEpoch {
                     filters: to_reconfirm,
