@@ -33,7 +33,10 @@ pub enum MasterToWorker {
     /// `leader_for_rank` would fail and the loop would die).
     /// Mirrors Go's `worker.Filter`-set / `worker.Allocated=false`
     /// state from `worker_allocator.go:421-440`.
-    Respawn { filter: Vec<u8>, start_consensus: bool },
+    Respawn {
+        filter: Vec<u8>,
+        start_consensus: bool,
+    },
     /// Request the worker to compute a join proof.
     CreateJoinProof {
         challenge: [u8; 32],
@@ -88,10 +91,7 @@ pub enum WorkerToMaster {
         timeout_data: Vec<u8>,
     },
     /// Periodic heartbeat from an active shard worker.
-    ShardHeartbeat {
-        core_id: u32,
-        filter: Vec<u8>,
-    },
+    ShardHeartbeat { core_id: u32, filter: Vec<u8> },
     /// (P3) An outbound commonware-simplex message for a shard's committee.
     /// The master publishes it on `shard_cw_bitmask(filter)` with the channel
     /// tagged into the payload (`shard_cw_frame_payload(channel, bytes)`).
@@ -115,10 +115,7 @@ pub enum WorkerToMaster {
     /// `filter`. Master removes the registry entry and unsubscribes
     /// from per-shard bitmasks (no peer here will produce or relay
     /// shard messages once we leave it).
-    ShardDeactivated {
-        core_id: u32,
-        filter: Vec<u8>,
-    },
+    ShardDeactivated { core_id: u32, filter: Vec<u8> },
 }
 
 /// State of a single worker thread.
@@ -215,13 +212,11 @@ pub struct WorkerOwnedDeps {
     /// the shard subtree from an archive and the engine fast-forwards its cursor.
     /// `None` in shared-state mode (or when no archive/key is wired), where the
     /// event is simply skipped. Mirrors the `worker_node.rs` (multi-process) path.
-    pub shard_syncer:
-        Option<Arc<dyn crate::prover_tree_syncer::ProverTreeSyncer>>,
+    pub shard_syncer: Option<Arc<dyn crate::prover_tree_syncer::ProverTreeSyncer>>,
     /// (B) Unified-cutover consolidation hook bound to THIS worker's CRDT/store
     /// (see `AppEngineDeps::unified_cutover_hook`). Built by the node
     /// (`worker_state_builder`); `None` skips consolidation (still flips).
-    pub unified_cutover_hook:
-        Option<Arc<dyn Fn(&[u8], u64) -> bool + Send + Sync>>,
+    pub unified_cutover_hook: Option<Arc<dyn Fn(&[u8], u64) -> bool + Send + Sync>>,
 }
 
 /// Thread-based worker manager. Core 0 is reserved for the master;
@@ -306,10 +301,7 @@ impl ThreadWorkerManager {
 
     /// Returns persisted worker state for the given core, when a
     /// store is wired and an entry exists.
-    pub fn load_persisted(
-        &self,
-        core_id: u32,
-    ) -> Option<quil_types::store::PersistedWorkerInfo> {
+    pub fn load_persisted(&self, core_id: u32) -> Option<quil_types::store::PersistedWorkerInfo> {
         self.worker_store
             .lock()
             .unwrap()
@@ -742,9 +734,9 @@ impl ThreadWorkerManager {
                                                                                 }
                                                                             }
                                                                             None => {
-                                                                                let anchor = match syncer.get_app_shard_frame(&f, 0).await {
-                                                                                    Ok(Some(frame)) => frame,
-                                                                                    Ok(None) => {
+                                                                                let (anchor, endpoint) = match syncer.get_app_shard_frame_at_endpoint(&f, 0, None).await {
+                                                                                    Ok((Some(frame), endpoint)) => (frame, endpoint),
+                                                                                    Ok((None, _)) => {
                                                                                         tracing::warn!(filter = %hex::encode(&f), "app-shard bootstrap: archive has no frame");
                                                                                         flag.store(false, std::sync::atomic::Ordering::SeqCst);
                                                                                         return;
@@ -762,9 +754,13 @@ impl ThreadWorkerManager {
                                                                                 };
                                                                                 let anchor_frame = header.frame_number;
                                                                                 let expected_roots = header.state_roots.clone();
+                                                                                info!(filter = %hex::encode(&f), anchor_frame, endpoint = ?endpoint, "app-shard bootstrap anchor selected");
                                                                                 let predecessor = if anchor_frame > 1 {
-                                                                                    match syncer.get_app_shard_frame(&f, anchor_frame - 1).await {
-                                                                                        Ok(frame) => frame,
+                                                                                    match syncer.get_app_shard_frame_at_endpoint(&f, anchor_frame - 1, endpoint.as_deref()).await {
+                                                                                        Ok((frame, predecessor_endpoint)) => {
+                                                                                            info!(filter = %hex::encode(&f), frame = anchor_frame - 1, endpoint = ?predecessor_endpoint, "app-shard bootstrap predecessor selected");
+                                                                                            frame
+                                                                                        }
                                                                                         Err(e) => {
                                                                                             tracing::warn!(filter = %hex::encode(&f), frame = anchor_frame, error = %e, "app-shard bootstrap: predecessor fetch failed");
                                                                                             flag.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -774,7 +770,7 @@ impl ThreadWorkerManager {
                                                                                 } else {
                                                                                     None
                                                                                 };
-                                                                                match syncer.sync_shard_tree(&f, &expected_roots).await {
+                                                                                match syncer.sync_shard_tree_at_endpoint(&f, &expected_roots, endpoint.as_deref()).await {
                                                                                     Ok(true) => {
                                                                                         tracing::info!(filter = %hex::encode(&f), anchor_frame, "app-shard bootstrap tree sync converged");
                                                                                         lb.send(crate::app_engine::AppEngineMessage::ShardBootstrapCompleted { anchor, predecessor });
@@ -922,12 +918,7 @@ impl ThreadWorkerManager {
 }
 
 impl WorkerManager for ThreadWorkerManager {
-    fn set_worker_filter(
-        &self,
-        core_id: u32,
-        filter: &[u8],
-        start_consensus: bool,
-    ) -> Result<()> {
+    fn set_worker_filter(&self, core_id: u32, filter: &[u8], start_consensus: bool) -> Result<()> {
         // Spawn-if-missing happens before mutate because spawn_worker
         // returns Result and we want to surface that error path.
         {
@@ -1068,10 +1059,7 @@ mod tests {
         mgr.allocate_worker(1, b"test-filter").unwrap();
 
         // Should receive Ready event
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        ).await;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
 
         match msg {
             Ok(Some(WorkerToMaster::Ready { core_id })) => {
@@ -1101,9 +1089,7 @@ mod tests {
 
     /// In-memory `WorkerStore` for the persist-across-restart path.
     #[derive(Default)]
-    struct MemWorkerStore(
-        std::sync::Mutex<HashMap<u32, quil_types::store::PersistedWorkerInfo>>,
-    );
+    struct MemWorkerStore(std::sync::Mutex<HashMap<u32, quil_types::store::PersistedWorkerInfo>>);
     impl quil_types::store::WorkerStore for MemWorkerStore {
         fn get_worker(
             &self,

@@ -66,14 +66,22 @@ impl ProdProverTreeSyncer {
     /// (audit #3), phases 1–3 have real header anchors — previously they were
     /// pulled best-effort behind phase 0, which let a peer serve divergent
     /// removes/hyperedge state. Returns whether the sync converged.
-    async fn sync_single_shard(&self, shard_id: Vec<u8>, expected_roots: &[Vec<u8>]) -> Result<bool> {
-        let mut client = ArchiveClient::connect_mtls(&self.resolve_addr().await, &self.falcon_signing_key)
-            .await
-            .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
+    async fn sync_single_shard(
+        &self,
+        shard_id: Vec<u8>,
+        expected_roots: &[Vec<u8>],
+    ) -> Result<bool> {
+        let mut client =
+            ArchiveClient::connect_mtls(&self.resolve_addr().await, &self.falcon_signing_key)
+                .await
+                .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
         let handle = tokio::runtime::Handle::current();
         for phase in 0u32..4 {
             // Header-committed root for this phase (empty ⇒ no anchor / trust).
-            let expected = expected_roots.get(phase as usize).cloned().unwrap_or_default();
+            let expected = expected_roots
+                .get(phase as usize)
+                .cloned()
+                .unwrap_or_default();
             let head = client
                 .get_forest_head(shard_id.clone(), phase)
                 .await
@@ -121,13 +129,22 @@ impl ProdProverTreeSyncer {
             };
             let rr = <[u8; 32]>::try_from(root_s.as_slice()).ok();
             let got = crate::forest_sync::sync_one_phase(
-                &mut client, &handle, &self.crdt, &shard_id, phase, v_s, rr,
+                &mut client,
+                &handle,
+                &self.crdt,
+                &shard_id,
+                phase,
+                v_s,
+                rr,
             )
             .await?;
             // POST-pull: the applied root must equal the anchor (belt-and-suspenders
             // — the diff should land exactly on the pre-verified peer root).
             if !expected.is_empty() && got.as_slice() != expected.as_slice() {
-                warn!(phase, "post-sync phase root still differs from the header-committed root");
+                warn!(
+                    phase,
+                    "post-sync phase root still differs from the header-committed root"
+                );
                 return Ok(false);
             }
         }
@@ -144,13 +161,17 @@ impl ProdProverTreeSyncer {
     /// phase whose aggregate or post-apply root diverges aborts the sync.
     /// Previously only phase 0 was bound; phases 1–3 could be served divergent.
     async fn sync_split_shard(&self, app: [u8; 32], expected_roots: &[Vec<u8>]) -> Result<bool> {
-        let mut client = ArchiveClient::connect_mtls(&self.resolve_addr().await, &self.falcon_signing_key)
-            .await
-            .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
+        let mut client =
+            ArchiveClient::connect_mtls(&self.resolve_addr().await, &self.falcon_signing_key)
+                .await
+                .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
         let handle = tokio::runtime::Handle::current();
         let sub_shards = self.crdt.app_sub_shards(&app);
         for phase in 0u32..4 {
-            let expected = expected_roots.get(phase as usize).cloned().unwrap_or_default();
+            let expected = expected_roots
+                .get(phase as usize)
+                .cloned()
+                .unwrap_or_default();
             // Fetch every sub-shard's head for this phase.
             let mut heads: Vec<(Vec<u8>, Vec<bool>, Option<(u64, [u8; 32])>)> =
                 Vec::with_capacity(sub_shards.len());
@@ -159,9 +180,8 @@ impl ProdProverTreeSyncer {
                     .get_forest_head(shard_id.clone(), phase)
                     .await
                     .map_err(|e| QuilError::Internal(format!("get_forest_head: {e}")))?;
-                let h32 = h.and_then(|(v, r)| {
-                    <[u8; 32]>::try_from(r.as_slice()).ok().map(|a| (v, a))
-                });
+                let h32 =
+                    h.and_then(|(v, r)| <[u8; 32]>::try_from(r.as_slice()).ok().map(|a| (v, a)));
                 heads.push((shard_id.clone(), bits.clone(), h32));
             }
             // Anchor (audit #5): the aggregate of all sub-shard roots for THIS
@@ -173,7 +193,10 @@ impl ProdProverTreeSyncer {
                     .map(|(_, bits, h)| (bits.clone(), h.map(|(_, r)| r).unwrap_or([0u8; 32])))
                     .collect();
                 if !self.crdt.app_root_matches(&sub_roots, &expected) {
-                    warn!(phase, "QUIL sub-shard roots do not aggregate to the header root — not syncing");
+                    warn!(
+                        phase,
+                        "QUIL sub-shard roots do not aggregate to the header root — not syncing"
+                    );
                     return Ok(false);
                 }
             }
@@ -181,11 +204,20 @@ impl ProdProverTreeSyncer {
             for (shard_id, _, head) in &heads {
                 let Some((v_s, root_s)) = *head else { continue };
                 let got = crate::forest_sync::sync_one_phase(
-                    &mut client, &handle, &self.crdt, shard_id, phase, v_s, Some(root_s),
+                    &mut client,
+                    &handle,
+                    &self.crdt,
+                    shard_id,
+                    phase,
+                    v_s,
+                    Some(root_s),
                 )
                 .await?;
                 if got != root_s {
-                    warn!(phase, "QUIL sub-shard post-sync root mismatch — not syncing");
+                    warn!(
+                        phase,
+                        "QUIL sub-shard post-sync root mismatch — not syncing"
+                    );
                     return Ok(false);
                 }
             }
@@ -205,15 +237,19 @@ impl ProdProverTreeSyncer {
         app: [u8; 32],
         prefix_bytes: &[u8],
         expected_roots: &[Vec<u8>],
+        addr: &str,
     ) -> Result<bool> {
         let prefix: Vec<u32> = prefix_bytes.iter().map(|b| *b as u32).collect();
         let bits = self.crdt.canonical_bits_for_prefix(&app, &prefix);
-        let mut client = ArchiveClient::connect_mtls(&self.resolve_addr().await, &self.falcon_signing_key)
+        let mut client = ArchiveClient::connect_mtls(addr, &self.falcon_signing_key)
             .await
             .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
         let handle = tokio::runtime::Handle::current();
         for phase in 0u32..4 {
-            let expected = expected_roots.get(phase as usize).cloned().unwrap_or_default();
+            let expected = expected_roots
+                .get(phase as usize)
+                .cloned()
+                .unwrap_or_default();
             let head = client
                 .get_forest_head(app.to_vec(), phase)
                 .await
@@ -221,7 +257,10 @@ impl ProdProverTreeSyncer {
             let Some((v_s, root_s)) = head else {
                 // Peer has no app tree for this phase → must match the zero anchor.
                 if !expected.is_empty() && expected.iter().any(|b| *b != 0) {
-                    warn!(phase, "peer absent but header app root non-empty — not syncing subtree");
+                    warn!(
+                        phase,
+                        "peer absent but header app root non-empty — not syncing subtree"
+                    );
                     return Ok(false);
                 }
                 continue;
@@ -229,7 +268,13 @@ impl ProdProverTreeSyncer {
             // Pin: the peer's advertised APP root must equal the header app root
             // for this phase (audit #5). Empty ⇒ trust (bootstrap).
             if !expected.is_empty() && root_s.as_slice() != expected.as_slice() {
-                warn!(phase, "peer app root != header-committed root — not syncing subtree");
+                warn!(
+                    phase,
+                    endpoint = %addr,
+                    peer_root = %hex::encode(&root_s),
+                    expected_root = %hex::encode(&expected),
+                    "peer app root != header-committed root — not syncing subtree",
+                );
                 return Ok(false);
             }
             let pinned = if expected.is_empty() {
@@ -239,7 +284,14 @@ impl ProdProverTreeSyncer {
             };
             // Pull ONLY this shard's subtree, authenticated against the app root.
             crate::forest_sync::sync_subtree_one_phase(
-                &mut client, &handle, &self.crdt, &app, phase, v_s, bits.clone(), pinned,
+                &mut client,
+                &handle,
+                &self.crdt,
+                &app,
+                phase,
+                v_s,
+                bits.clone(),
+                pinned,
             )
             .await?;
         }
@@ -257,7 +309,9 @@ impl ProdProverTreeSyncer {
         if expected_roots.len() < 4 || expected_roots.iter().any(|r| r.is_empty()) {
             return false;
         }
-        let Some(sk) = crate::forest_sync::app_shard_key(l2) else { return false };
+        let Some(sk) = crate::forest_sync::app_shard_key(l2) else {
+            return false;
+        };
         for phase in 0u32..4 {
             let (s, p) = crate::forest_sync::phase_strs(phase);
             let mut local = self.crdt.compute_shard_root(s, p, &sk);
@@ -287,10 +341,21 @@ impl ProverTreeSyncer for ProdProverTreeSyncer {
             return Ok(true);
         }
         info!(addr = %self.master_stream_addr, "syncing global prover tree (forest diff)");
-        self.sync_single_shard(vec![0xffu8; 32], expected_roots).await
+        self.sync_single_shard(vec![0xffu8; 32], expected_roots)
+            .await
     }
 
     async fn sync_shard_tree(&self, filter: &[u8], expected_roots: &[Vec<u8>]) -> Result<bool> {
+        self.sync_shard_tree_at_endpoint(filter, expected_roots, None)
+            .await
+    }
+
+    async fn sync_shard_tree_at_endpoint(
+        &self,
+        filter: &[u8],
+        expected_roots: &[Vec<u8>],
+        endpoint: Option<&str>,
+    ) -> Result<bool> {
         let n = filter.len().min(32);
         let mut l2 = [0u8; 32];
         l2[..n].copy_from_slice(&filter[..n]);
@@ -305,7 +370,15 @@ impl ProverTreeSyncer for ProdProverTreeSyncer {
         // the whole app. A whole-app sync (no prefix, e.g. an archive) diffs the
         // one tree directly.
         if self.crdt.unified_tree() {
-            let prefix_bytes: Vec<u8> = if filter.len() > 32 { filter[32..].to_vec() } else { Vec::new() };
+            let addr = match endpoint {
+                Some(endpoint) => endpoint.to_owned(),
+                None => self.resolve_addr().await,
+            };
+            let prefix_bytes: Vec<u8> = if filter.len() > 32 {
+                filter[32..].to_vec()
+            } else {
+                Vec::new()
+            };
             if prefix_bytes.is_empty() {
                 info!(
                     addr = %self.master_stream_addr,
@@ -319,7 +392,9 @@ impl ProverTreeSyncer for ProdProverTreeSyncer {
                 filter = %hex::encode(&filter[..n]),
                 "syncing shard subtree (unified, range diff — only this prefix)"
             );
-            return self.sync_shard_subtree(l2, &prefix_bytes, expected_roots).await;
+            return self
+                .sync_shard_subtree(l2, &prefix_bytes, expected_roots, &addr)
+                .await;
         }
         // QUIL splits 64-way: its state lives in sub-shard trees (app‖prefix),
         // verified as a set via the aggregation binding (all 4 phases).
@@ -340,13 +415,39 @@ impl ProverTreeSyncer for ProdProverTreeSyncer {
         filter: &[u8],
         frame_number: u64,
     ) -> Result<Option<quil_types::proto::global::AppShardFrame>> {
-        let addr = self.resolve_addr().await;
+        Ok(self
+            .get_app_shard_frame_at_endpoint(filter, frame_number, None)
+            .await?
+            .0)
+    }
+
+    async fn get_app_shard_frame_at_endpoint(
+        &self,
+        filter: &[u8],
+        frame_number: u64,
+        endpoint: Option<&str>,
+    ) -> Result<(
+        Option<quil_types::proto::global::AppShardFrame>,
+        Option<String>,
+    )> {
+        let addr = match endpoint {
+            Some(endpoint) => endpoint.to_owned(),
+            None => self.resolve_addr().await,
+        };
         let mut client = ArchiveClient::connect_mtls(&addr, &self.falcon_signing_key)
             .await
             .map_err(|e| QuilError::Internal(format!("archive connect: {e}")))?;
-        client
+        let frame = client
             .get_app_shard_frame(filter.to_vec(), frame_number)
             .await
-            .map_err(|e| QuilError::Internal(format!("get app-shard frame: {e}")))
+            .map_err(|e| QuilError::Internal(format!("get app-shard frame: {e}")))?;
+        info!(
+            endpoint = %addr,
+            requested_frame = frame_number,
+            returned_frame = frame.as_ref().and_then(|f| f.header.as_ref()).map(|h| h.frame_number),
+            filter = %hex::encode(filter),
+            "app-shard frame fetched from archive",
+        );
+        Ok((frame, Some(addr)))
     }
 }

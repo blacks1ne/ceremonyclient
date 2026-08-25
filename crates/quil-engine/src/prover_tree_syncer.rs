@@ -41,9 +41,36 @@ pub trait ProverTreeSyncer: Send + Sync {
         Ok(false)
     }
 
+    /// As [`Self::sync_shard_tree`], but pins the request to `endpoint` when an
+    /// implementation supports it. Bootstrap uses this to ensure that an anchor
+    /// frame and its authenticated forest roots come from the same archive.
+    async fn sync_shard_tree_at_endpoint(
+        &self,
+        filter: &[u8],
+        expected_roots: &[Vec<u8>],
+        _endpoint: Option<&str>,
+    ) -> Result<bool> {
+        self.sync_shard_tree(filter, expected_roots).await
+    }
+
     /// Fetch an app-shard frame from an archive. `frame_number == 0` requests
     /// the latest frame and is used to seed an empty worker's clock lineage.
-    async fn get_app_shard_frame(&self, _filter: &[u8], _frame_number: u64) -> Result<Option<AppShardFrame>> {
+    async fn get_app_shard_frame(
+        &self,
+        _filter: &[u8],
+        _frame_number: u64,
+    ) -> Result<Option<AppShardFrame>> {
         Ok(None)
+    }
+
+    /// Fetch an app-shard frame, optionally pinning to `endpoint`. Returns the
+    /// endpoint actually used when the implementation can report it.
+    async fn get_app_shard_frame_at_endpoint(
+        &self,
+        filter: &[u8],
+        frame_number: u64,
+        _endpoint: Option<&str>,
+    ) -> Result<(Option<AppShardFrame>, Option<String>)> {
+        Ok((self.get_app_shard_frame(filter, frame_number).await?, None))
     }
 }
