@@ -922,7 +922,17 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                     epoch,
                     &rho_n,
                 )
-                .unwrap_or_default();
+                .unwrap_or_else(|error| {
+                    warn!(
+                        core_id = self.core_id,
+                        filter = hex::encode(&self.filter),
+                        frame = frame_number,
+                        epoch,
+                        error = %error,
+                        "app-shard proof: initial replica-opening read failed"
+                    );
+                    Vec::new()
+                });
                 if opening_blob.is_empty() {
                     // (1) worker-side shard-data sync into its OWN store.
                     if let Some(source) = self.storage_source_hypergraph.as_ref() {
@@ -930,16 +940,26 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                         match crate::app_shard_metadata::sync_app_shard_to_own_crdt(
                             source, own_crdt, app_addr, anchor_gfn,
                         ) {
-                            Ok(n) if n > 0 => tracing::info!(
-                                frame = frame_number, copied = n,
+                            Ok(copied) => tracing::info!(
+                                core_id = self.core_id,
+                                filter = hex::encode(&self.filter),
+                                frame = frame_number,
+                                epoch,
+                                copied,
                                 "worker-side shard-data sync into own store"
                             ),
-                            Err(e) => warn!(frame = frame_number, error = %e, "worker shard sync failed"),
-                            _ => {}
+                            Err(error) => warn!(
+                                core_id = self.core_id,
+                                filter = hex::encode(&self.filter),
+                                frame = frame_number,
+                                epoch,
+                                error = %error,
+                                "worker shard sync failed"
+                            ),
                         }
                     }
                     // (2) SDR-seal from the worker's OWN crdt into its OWN replica_store.
-                    if let Err(e) = crate::app_shard_metadata::compute_storage_confirm(
+                    if let Err(error) = crate::app_shard_metadata::compute_storage_confirm(
                         own_crdt,
                         &replica_store,
                         &[self.filter.clone()],
@@ -948,7 +968,14 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                         quil_types::consensus::STORAGE_BLOCK_POLY_SIZE,
                         &quil_crypto::sdr::SdrParams::default(),
                     ) {
-                        warn!(frame = frame_number, error = %e, "storage self-seal failed");
+                        warn!(
+                            core_id = self.core_id,
+                            filter = hex::encode(&self.filter),
+                            frame = frame_number,
+                            epoch,
+                            error = %error,
+                            "storage self-seal failed"
+                        );
                     }
                     // (3) attest from the worker's OWN replicas.
                     opening_blob = crate::app_shard_metadata::build_vote_openings(
@@ -959,7 +986,17 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                         epoch,
                         &rho_n,
                     )
-                    .unwrap_or_default();
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            core_id = self.core_id,
+                            filter = hex::encode(&self.filter),
+                            frame = frame_number,
+                            epoch,
+                            error = %error,
+                            "app-shard proof: post-seal replica-opening read failed"
+                        );
+                        Vec::new()
+                    });
                 }
                 {
                     if !opening_blob.is_empty() {
@@ -1001,10 +1038,32 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                             );
                         }
                     } else {
-                        warn!(
-                            frame = frame_number,
-                            "app-shard proof: build_vote_openings produced nothing (no readable replicas for this shard) — frame carries NO storage attestation (the global storage gate will withhold this shard's reward)"
-                        );
+                        match crate::app_shard_metadata::vote_opening_inventory(
+                            own_crdt,
+                            &replica_store,
+                            &self.filter,
+                            epoch,
+                        ) {
+                            Ok((covered_leaves, readable_replicas)) => warn!(
+                                core_id = self.core_id,
+                                filter = hex::encode(&self.filter),
+                                frame = frame_number,
+                                epoch,
+                                anchor_global_frame = anchor_gfn,
+                                covered_leaves,
+                                readable_replicas,
+                                "app-shard proof: build_vote_openings produced nothing (no readable replicas for this shard) — frame carries NO storage attestation (the global storage gate will withhold this shard's reward)"
+                            ),
+                            Err(error) => warn!(
+                                core_id = self.core_id,
+                                filter = hex::encode(&self.filter),
+                                frame = frame_number,
+                                epoch,
+                                anchor_global_frame = anchor_gfn,
+                                error = %error,
+                                "app-shard proof: could not inventory covered leaves after empty openings"
+                            ),
+                        }
                     }
                 }
             }

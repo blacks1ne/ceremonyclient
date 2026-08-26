@@ -443,6 +443,35 @@ pub fn build_vote_openings(
     Ok(prost::Message::encode_to_vec(&att))
 }
 
+/// Count the leaf prefixes covered by an app-shard filter and how many have a
+/// readable replica for `epoch`. This is deliberately separate from
+/// [`build_vote_openings`] so callers can explain an empty attestation without
+/// conflating an empty shard with missing replica data.
+pub fn vote_opening_inventory(
+    crdt: &HypergraphCrdt,
+    replica_store: &quil_store::replica_store::ReplicaStore,
+    filter: &[u8],
+    epoch: u64,
+) -> quil_types::error::Result<(usize, usize)> {
+    use quil_execution::global_intrinsic::leaf_id_bytes;
+
+    let (app, sub_prefix) = split_coverage_filter(filter);
+    let l1 = quil_hypergraph::addressing::get_bloom_filter_indices(app, 256, 3);
+    let mut shard_key = Vec::with_capacity(3 + app.len());
+    shard_key.extend_from_slice(&l1);
+    shard_key.extend_from_slice(app);
+    let prefixes = partition_shard_leaves(crdt, &shard_key, &sub_prefix);
+    let covered_leaves = prefixes.len();
+    let mut readable_replicas = 0;
+    for prefix in prefixes {
+        let leaf_id = leaf_id_bytes(filter, &prefix);
+        if replica_store.get(epoch, &leaf_id)?.is_some() {
+            readable_replicas += 1;
+        }
+    }
+    Ok((covered_leaves, readable_replicas))
+}
+
 /// Decode the openings a peer attached to its vote (inverse of
 /// [`build_vote_openings`]). Empty / malformed blob → no openings.
 pub fn decode_vote_openings(blob: &[u8]) -> Vec<quil_crypto::porep::StorageOpening> {
