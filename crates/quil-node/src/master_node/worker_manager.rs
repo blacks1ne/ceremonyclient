@@ -817,6 +817,14 @@ pub(crate) fn init(
                                                 "suppressing shard vote publish — coverage halt active");
                                             continue;
                                         }
+                                        // Successful sends are fire-and-forget. Log the local
+                                        // vote before handing it to transport so diagnostics can
+                                        // distinguish it from relaying a remote finalization.
+                                        info!(
+                                            core_id,
+                                            filter = %hex::encode(&filter),
+                                            "local app-shard vote produced"
+                                        );
                                         let p2p = drain_p2p.clone();
                                         drain_spawner.detach("shard-vote-publish", async move {
                                             if let Err(e) = p2p

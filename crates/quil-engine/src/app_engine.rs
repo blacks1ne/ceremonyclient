@@ -2725,6 +2725,72 @@ impl AppConsensusEngine {
         }
         let frame_number = header.frame_number;
 
+        // A local relay of a finalized header does not establish that this
+        // worker actually participated in its quorum. Re-verify the certificate
+        // against the epoch-pinned committee and report local membership/signing
+        // explicitly, before persisting the frame.
+        let committee_frame = if header.global_frame_number > 0 {
+            header.global_frame_number
+        } else {
+            header.frame_number
+        };
+        match self
+            .prover_registry
+            .get_active_provers(&header.address, committee_frame)
+        {
+            Ok(active) => {
+                let local = active
+                    .iter()
+                    .find(|p| p.address == self.local_prover_address);
+                let committee_pubkeys: Vec<Vec<u8>> =
+                    active.iter().map(|p| p.public_key.clone()).collect();
+                let mut namespace = b"appshard".to_vec();
+                namespace.extend_from_slice(&header.address);
+                let output_digest = quil_crypto::poseidon::hash_bytes_to_32(&header.output)
+                    .unwrap_or_default();
+                match quil_cw_consensus::app_cert::verify_finalization(
+                    cert,
+                    &committee_pubkeys,
+                    &namespace,
+                    output_digest,
+                ) {
+                    Some(signers) => {
+                        let local_signed = local
+                            .map(|p| signers.iter().any(|pk| pk == &p.public_key))
+                            .unwrap_or(false);
+                        tracing::info!(
+                            core_id = self.core_id,
+                            filter = %hex::encode(&self.filter),
+                            frame = frame_number,
+                            global_frame = header.global_frame_number,
+                            committee_size = active.len(),
+                            signer_count = signers.len(),
+                            local_committee_member = local.is_some(),
+                            local_signed,
+                            locally_verified,
+                            "cw finalized app frame participation"
+                        );
+                    }
+                    None => tracing::warn!(
+                        core_id = self.core_id,
+                        filter = %hex::encode(&self.filter),
+                        frame = frame_number,
+                        global_frame = header.global_frame_number,
+                        committee_size = active.len(),
+                        "cw finalized app frame participation: certificate could not be re-verified"
+                    ),
+                }
+            }
+            Err(error) => tracing::warn!(
+                core_id = self.core_id,
+                filter = %hex::encode(&self.filter),
+                frame = frame_number,
+                global_frame = header.global_frame_number,
+                %error,
+                "cw finalized app frame participation: active committee lookup failed"
+            ),
+        }
+
         // Persist the finalized frame to the shard clock store so the NEXT
         // `prove_next_state` (which reads `get_latest_shard_clock_frame`) chains
         // on it — otherwise the chain stalls re-proposing on genesis. The legacy
