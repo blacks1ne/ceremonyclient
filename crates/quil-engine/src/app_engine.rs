@@ -303,6 +303,7 @@ impl quil_types::store::Transaction for AppNoopTxn {
 }
 
 struct AppLeaderProvider {
+    core_id: u32,
     filter: Vec<u8>,
     clock_store: Arc<dyn ClockStore>,
     /// Store to resolve the GLOBAL anchor (`anchor_gfn`/ρ_N) from — the
@@ -2364,6 +2365,7 @@ impl AppConsensusEngine {
         let leader_provider: Arc<
             dyn quil_consensus::leader_provider::LeaderProvider<AppShardState>,
         > = Arc::new(AppLeaderProvider {
+            core_id: self.core_id,
             filter: filter.clone(),
             clock_store: self.clock_store.clone(),
             global_anchor_store: self.global_anchor_store.clone(),
