@@ -434,6 +434,52 @@ pub(crate) fn resolve_global_anchor(store: &dyn ClockStore) -> (u64, Vec<u8>) {
     }
 }
 
+/// Derive the four commitments an app-frame header advertises for its
+/// *pre-state*. This is deliberately read-only: frame `N` is proposed before
+/// its requests materialize, so `commit(N)` would drain an already-empty dirty
+/// set and advertise zero roots for a live shard.
+///
+/// The vertex-adds root is captured as a snapshot generation so a peer can
+/// bootstrap against this historic header rather than the archive's moving tip.
+fn app_frame_pre_state_roots(
+    hypergraph: Option<&Arc<quil_hypergraph::HypergraphCrdt>>,
+    filter: &[u8],
+    frame_number: u64,
+) -> Vec<Vec<u8>> {
+    let zero_roots = || vec![vec![0u8; 64]; 4];
+    let Some(hg) = hypergraph else {
+        return zero_roots();
+    };
+    let l1 = quil_hypergraph::addressing::get_bloom_filter_indices(
+        &filter[..filter.len().min(32)], 256, 3,
+    );
+    let mut l2 = [0u8; 32];
+    let copy_len = filter.len().min(32);
+    l2[..copy_len].copy_from_slice(&filter[..copy_len]);
+    let shard_key = quil_types::store::ShardKey { l1, l2 };
+    let zero = vec![0u8; if hg.has_forest() { 32 } else { 64 }];
+    let out: Vec<Vec<u8>> = [
+        ("vertex", "adds"),
+        ("vertex", "removes"),
+        ("hyperedge", "adds"),
+        ("hyperedge", "removes"),
+    ].iter().map(|(set, phase)| {
+        let root = if hg.unified_tree() {
+            hg.sub_shard_commitment_for_filter(set, phase, filter)
+        } else {
+            hg.compute_shard_root(set, phase, &shard_key)
+        };
+        if root.is_empty() { zero.clone() } else { root }
+    }).collect();
+    if out[0].iter().any(|byte| *byte != 0) {
+        if let Err(e) = hg.publish_snapshot_capturing(out[0].clone(), frame_number) {
+            warn!(filter = hex::encode(filter), frame = frame_number, error = %e,
+                "failed to capture snapshot for published shard root");
+        }
+    }
+    out
+}
+
 impl AppLeaderProvider {
     fn resolve_global_anchor(&self) -> (u64, Vec<u8>) {
         resolve_global_anchor(self.global_anchor_store.as_ref())
@@ -742,7 +788,6 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
         // After commit, the live add-tree root is published as a
         // snapshot generation so sync clients can pin against the same
         // state our header advertises (`hypergraph/snapshot_manager.go`).
-        let zero_roots = || vec![vec![0u8; 64]; 4];
         // DETERMINISTIC PRE-STATE ROOTS (audit #3+#6, consensus-rule change).
         // Previously `state_roots` came from `hg.commit(N)`, which DRAINS the
         // pending deltas (`std::mem::take`) — but at propose time there are none
@@ -766,58 +811,7 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
         // by the time this producer computes `state_roots` the CRDT already
         // reflects the cutover — no flip needed here (this is AppLeaderProvider,
         // which shares the worker's CRDT Arc with the engine).
-        let state_roots: Vec<Vec<u8>> = match self.hypergraph.as_ref() {
-            Some(hg) => {
-                let l1 = quil_hypergraph::addressing::get_bloom_filter_indices(
-                    &self.filter[..self.filter.len().min(32)],
-                    256,
-                    3,
-                );
-                let mut l2 = [0u8; 32];
-                let copy_len = self.filter.len().min(32);
-                l2[..copy_len].copy_from_slice(&self.filter[..copy_len]);
-                let shard_key = quil_types::store::ShardKey { l1, l2 };
-                let zero = vec![0u8; if hg.has_forest() { 32 } else { 64 }];
-                let out: Vec<Vec<u8>> = [
-                    ("vertex", "adds"),
-                    ("vertex", "removes"),
-                    ("hyperedge", "adds"),
-                    ("hyperedge", "removes"),
-                ]
-                .iter()
-                .map(|(s, p)| {
-                    // (A) Sharded unified model: the per-shard `state_root` is the
-                    // covered SUBTREE root (computable from partial, subtree-only
-                    // storage), NOT `compute_shard_root(app)` (the whole-app
-                    // aggregate a subtree-only worker cannot reproduce). Gated on
-                    // the worker CRDT being unified (flipped at the cutover by (B));
-                    // legacy pre-cutover keeps the aggregate so in-flight frames
-                    // don't fork. Unsplit app is a no-op (subtree root == app root).
-                    let r = if hg.unified_tree() {
-                        hg.sub_shard_commitment_for_filter(s, p, &self.filter)
-                    } else {
-                        hg.compute_shard_root(s, p, &shard_key)
-                    };
-                    if r.is_empty() { zero.clone() } else { r }
-                })
-                .collect();
-                // Publish the shard's vertex-adds root as a snapshot generation
-                // (binding a real point-in-time DB snapshot) so sync clients
-                // pinning this header get root-consistent CRDT data.
-                if out[0].iter().any(|b| *b != 0) {
-                    if let Err(e) = hg.publish_snapshot_capturing(out[0].clone(), frame_number) {
-                        warn!(
-                            filter = hex::encode(&self.filter),
-                            frame = frame_number,
-                            error = %e,
-                            "failed to capture snapshot for published shard root"
-                        );
-                    }
-                }
-                out
-            }
-            None => zero_roots(),
-        };
+        let state_roots = app_frame_pre_state_roots(self.hypergraph.as_ref(), &self.filter, frame_number);
 
         // Per-frame requests root over the messages included in this
         // proposal. Mirrors Go's `calculateRequestsRoot` +
@@ -4442,7 +4436,7 @@ mod tests {
     /// the engine's `HypergraphState` changeset to the CRDT (`state.commit()` in
     /// the hypergraph engine's `process_message`), which previously never ran.
     #[test]
-    fn app_shard_real_write_mutates_state_and_roots() {
+    fn v3_cutover_keeps_app_header_root_and_snapshot_after_archive_commit() {
         use quil_types::proto::hypergraph::VertexAdd;
         use quil_execution::hypergraph_intrinsic::confidential;
         use quil_execution::hypergraph_intrinsic::vertex_ops::{
@@ -4450,6 +4444,12 @@ mod tests {
         };
         use quil_types::crypto::Signer as _;
         use std::sync::Arc;
+
+        const PRE_CUTOVER_FRAME: u64 =
+            quil_execution::global_intrinsic::materialize::QUIL_PROVER_RESET_V3_FRAME - 1;
+        const CUTOVER_FRAME: u64 =
+            quil_execution::global_intrinsic::materialize::QUIL_PROVER_RESET_V3_FRAME;
+        assert_eq!(CUTOVER_FRAME, 747_000);
 
         // The hypergraph engine verifies a VertexAdd's signature with real Falcon
         // (`falcon_verify`) against the domain's WRITE key — so use a real key +
@@ -4556,7 +4556,7 @@ mod tests {
         // 1. The op is ACCEPTED — it passes validation (structural proofs +
         //    real Falcon write-key signature verify). This is a genuinely valid
         //    write, not a stub.
-        mgr.process_message(1, &num_bigint::BigInt::from(0), &domain, &bundle_bytes)
+        mgr.process_message(PRE_CUTOVER_FRAME, &num_bigint::BigInt::from(0), &domain, &bundle_bytes)
             .expect("a well-formed, signed VertexAdd must pass validation");
 
         // 2. The write MATERIALIZED into the CRDT: the vertex is present and the
@@ -4581,7 +4581,7 @@ mod tests {
         //    non-zero. This is the real write → materialize → state_roots chain —
         //    the root the global reward audit reconstructs and PoRep's per-epoch
         //    leaf re-registration re-encodes.
-        let roots_after = shard_roots(1);
+        let roots_after = shard_roots(PRE_CUTOVER_FRAME);
         assert!(
             roots_after
                 .first()
@@ -4589,6 +4589,19 @@ mod tests {
                 .unwrap_or(false),
             "vertex-adds root (state_roots[0]) must be non-zero after a real write; got {roots_after:?}"
         );
+
+        // Archive materialization has already consumed the dirty delta. This is
+        // the old proposal-time failure mode at 747000: commit yields no roots.
+        assert!(crdt.commit(CUTOVER_FRAME).unwrap().is_empty());
+
+        // The header must instead bind the durable N-1 pre-state and retain the
+        // matching snapshot for a catching-up shard.
+        let header_roots = app_frame_pre_state_roots(Some(&crdt), &domain, CUTOVER_FRAME);
+        assert_eq!(header_roots, roots_after, "747000 header must bind N-1 app state");
+        assert!(header_roots[0].iter().any(|byte| *byte != 0));
+        let snapshot = crdt.acquire_snapshot(&header_roots[0])
+            .expect("archive must retain a root-addressable cutoff snapshot");
+        assert_eq!(snapshot.frame_number, CUTOVER_FRAME);
     }
 
     #[test]
