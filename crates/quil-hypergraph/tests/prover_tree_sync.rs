@@ -115,6 +115,57 @@ fn empty_follower_converges_to_leader_prover_root() {
     );
 }
 
+/// A root-addressed archive pull must serve the historical tree selected by
+/// `ResolveRoot`, even after the archive has advanced its live head. This is
+/// the archive-side invariant behind state-jump and periodic reconciliation.
+#[test]
+fn resolved_historical_prover_root_reconstructs_at_its_version() {
+    let leader = fresh_crdt();
+    seed_and_commit(&leader, 4, 100);
+    let anchor: [u8; 32] = leader
+        .compute_shard_root("vertex", "adds", &global_prover_shard())
+        .try_into()
+        .expect("32-byte prover root");
+
+    let (version, global_frame) = leader
+        .resolve_root(&GLOBAL_APP, 0, anchor)
+        .expect("archive resolves its committed root");
+    assert_eq!(global_frame, 100);
+
+    // Advance the live head with an additional prover entry. The historical
+    // version returned above must remain independently readable.
+    leader
+        .add_vertex(
+            &Location {
+                app_address: GLOBAL_APP,
+                data_address: [0xF0; 32],
+            },
+            b"post-anchor prover",
+        )
+        .unwrap();
+    leader.commit(101).unwrap();
+    assert_ne!(
+        leader.serve_forest_head(&GLOBAL_APP, 0).unwrap().1,
+        anchor,
+        "live head advanced beyond the resolved root"
+    );
+
+    let follower = fresh_crdt();
+    let reader = InProcTreeReader {
+        source: leader.clone(),
+        shard_id: GLOBAL_APP.to_vec(),
+        phase: 0,
+    };
+    follower
+        .sync_shard_phase_from(&reader, version, &GLOBAL_APP, 0)
+        .expect("sync exact resolved version");
+    assert_eq!(
+        follower.compute_shard_root("vertex", "adds", &global_prover_shard()),
+        anchor,
+        "ResolveRoot version must reconstruct the authenticated historical root"
+    );
+}
+
 /// A follower that is STALE (holds an older subset) converges after sync — the
 /// Merkle diff carries only the missing/changed leaves and reaches the leader root.
 #[test]

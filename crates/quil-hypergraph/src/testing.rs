@@ -69,6 +69,9 @@ impl Transaction for MemTxn {
 pub struct MemStore {
     nodes: Mutex<HashMap<String, Vec<u8>>>,
     roots: Mutex<HashMap<String, Vec<u8>>>,
+    /// Historical root → (tree version, global frame), mirroring the archive
+    /// root-resolution index used by `ResolveRoot`.
+    root_versions: Mutex<HashMap<(String, String, Vec<u8>, Vec<u8>), (u64, u64)>>,
     /// Per-vertex underlying-data keyed by `(scope_prefix, vk)` so
     /// `for_each_vertex_underlying` can hand back the exact original
     /// `vk` bytes without round-tripping them through the debug-format
@@ -85,6 +88,7 @@ impl MemStore {
         Self {
             nodes: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
+            root_versions: Mutex::new(HashMap::new()),
             per_vertex: Mutex::new(HashMap::new()),
             kv: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -100,6 +104,20 @@ impl MemStore {
 
     fn vertex_scope(set: &str, phase: &str, shard: &ShardKey) -> String {
         format!("{}/{}/{:?}{:?}", set, phase, shard.l1, shard.l2)
+    }
+
+    fn root_version_key(
+        set: &str,
+        phase: &str,
+        shard_id: &[u8],
+        root_hash: &[u8],
+    ) -> (String, String, Vec<u8>, Vec<u8>) {
+        (
+            set.to_owned(),
+            phase.to_owned(),
+            shard_id.to_vec(),
+            root_hash.to_vec(),
+        )
     }
 
     /// Number of tree nodes written to the store (test introspection).
@@ -166,6 +184,33 @@ impl HypergraphStore for MemStore {
             }
         }
         Ok(count)
+    }
+    fn put_root_version(
+        &self,
+        _: &dyn Transaction,
+        set: &str,
+        phase: &str,
+        shard_id: &[u8],
+        root_hash: &[u8],
+        version: u64,
+        frame_number: u64,
+    ) -> Result<()> {
+        self.root_versions.lock().unwrap().insert(
+            Self::root_version_key(set, phase, shard_id, root_hash),
+            (version, frame_number),
+        );
+        Ok(())
+    }
+    fn get_root_version(
+        &self,
+        set: &str,
+        phase: &str,
+        shard_id: &[u8],
+        root_hash: &[u8],
+    ) -> Result<Option<(u64, u64)>> {
+        Ok(self.root_versions.lock().unwrap()
+            .get(&Self::root_version_key(set, phase, shard_id, root_hash))
+            .copied())
     }
     fn apply_snapshot(&self, _: &str) -> Result<()> { Ok(()) }
     fn set_alt_shard_commit(&self, _: &dyn Transaction, _: u64, _: &[u8], _: &[u8], _: &[u8], _: &[u8], _: &[u8]) -> Result<()> { Ok(()) }
