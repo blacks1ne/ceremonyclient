@@ -55,6 +55,37 @@ fn archive_frame_is_valid(
             false
         }
     }
+
+}
+
+#[cfg(test)]
+mod state_jump_timeout_tests {
+    use super::*;
+    use quil_types::proto::global::{GlobalFrame, GlobalFrameHeader};
+
+    #[test]
+    fn gossip_clock_head_does_not_end_state_jump_before_materialization() {
+        let db = quil_store::RocksDb::open_in_memory().unwrap();
+        let store = quil_store::RocksClockStore::new(db.inner());
+        let frame = GlobalFrame {
+            header: Some(GlobalFrameHeader {
+                frame_number: 796_664,
+                ..Default::default()
+            }),
+            requests: Vec::new(),
+        };
+        store.put_global_frame(&frame, None).unwrap();
+
+        assert_eq!(store.get_latest_frame_number(), Some(796_664));
+        assert_eq!(
+            state_jump_local_head(&store),
+            0,
+            "a gossip-persisted frame is not a synced prover-tree checkpoint",
+        );
+
+        store.put_global_materialized_cursor(796_663).unwrap();
+        assert_eq!(state_jump_local_head(&store), 796_663);
+    }
 }
 
 /// Reconstruct a `GlobalProposal` for frame `n` from the LOCAL clock store,
@@ -788,6 +819,14 @@ fn state_jump_min_gap() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(1_000)
 }
+
+/// State-jump eligibility is based on materialized state, not the newest
+/// stored clock frame. Gossip may persist a validated global frame before the
+/// corresponding prover tree has been acquired; treating that frame as local
+/// recovery progress would release the startup barrier with an empty registry.
+fn state_jump_local_head(clock_store: &quil_store::RocksClockStore) -> u64 {
+    clock_store.get_global_materialized_cursor().unwrap_or(0)
+}
 /// Backoff between state-jump retry passes when the node IS far behind but no peer
 /// completed a jump this pass (empty/failing pool at boot, transient peer errors).
 /// Short enough to catch up quickly once a usable archive appears; long enough not
@@ -851,7 +890,7 @@ async fn run_state_jump(
         if cancel.is_cancelled() {
             return None;
         }
-        let local_head = clock_store.get_latest_frame_number().unwrap_or(0);
+        let local_head = state_jump_local_head(clock_store.as_ref());
         // Archive ceiling (see STATE_JUMP_MAX_FRAME): once an archive is current-era
         // it must verify, not blind-trust a peer. Non-archives have no ceiling —
         // whether they jump is decided per-peer purely by the gap to that peer's
