@@ -23,14 +23,8 @@ pub fn register_engine_metrics() {
         "engine_frame_number",
         "Current frame number being processed"
     );
-    describe_gauge!(
-        "engine_current_rank",
-        "Current consensus rank of this node"
-    );
-    describe_gauge!(
-        "engine_difficulty",
-        "Current mining / VDF difficulty"
-    );
+    describe_gauge!("engine_current_rank", "Current consensus rank of this node");
+    describe_gauge!("engine_difficulty", "Current mining / VDF difficulty");
     describe_gauge!(
         "engine_pending_messages",
         "Number of messages waiting to be processed"
@@ -53,10 +47,7 @@ pub fn register_engine_metrics() {
         "engine_proposals_received_total",
         "Total number of proposals received from peers"
     );
-    describe_counter!(
-        "engine_votes_total",
-        "Total number of votes produced"
-    );
+    describe_counter!("engine_votes_total", "Total number of votes produced");
     describe_counter!(
         "engine_votes_received_total",
         "Total number of standalone votes received from peers"
@@ -80,6 +71,18 @@ pub fn register_engine_metrics() {
     describe_counter!(
         "engine_frames_received_total",
         "Total number of frames received over BlossomSub"
+    );
+    describe_counter!(
+        "engine_app_shard_router_messages_total",
+        "App-shard gossip messages routed to a local worker, labelled by message kind"
+    );
+    describe_counter!(
+        "engine_app_shard_full_frames_total",
+        "Full app-shard frames at each follower receive/materialization outcome, labelled by outcome"
+    );
+    describe_counter!(
+        "engine_app_shard_sync_total",
+        "App-shard catch-up sync attempts, labelled by outcome"
     );
     describe_counter!(
         "engine_prover_root_matches_total",
@@ -147,10 +150,7 @@ pub fn register_engine_metrics() {
         "engine_grpc_submits_duplicate_total",
         "Inbound gRPC submit_global_message calls deduplicated (already delivered)"
     );
-    describe_histogram!(
-        "engine_vdf_prove_seconds",
-        "VDF proof computation duration"
-    );
+    describe_histogram!("engine_vdf_prove_seconds", "VDF proof computation duration");
     describe_histogram!(
         "engine_archive_submit_seconds",
         "Round-trip duration of an outbound archive submit"
@@ -217,6 +217,28 @@ pub fn inc_frames_materialized() {
 #[inline]
 pub fn inc_frames_received() {
     counter!("engine_frames_received_total").increment(1);
+}
+
+/// Record a shard gossip message after the master has matched it to a local
+/// worker. `kind` is a fixed protocol category, never a shard filter, so this
+/// cannot create unbounded metric cardinality.
+#[inline]
+pub fn inc_app_shard_router_message(kind: &'static str) {
+    counter!("engine_app_shard_router_messages_total", "kind" => kind).increment(1);
+}
+
+/// Record an app-frame receive/materialization outcome. Outcomes are a small,
+/// fixed vocabulary (for example `accepted`, `validation_rejected`, `buffered`,
+/// `materialized`, and `gap`).
+#[inline]
+pub fn inc_app_shard_full_frame(outcome: &'static str) {
+    counter!("engine_app_shard_full_frames_total", "outcome" => outcome).increment(1);
+}
+
+/// Record the result of an archive-backed app-shard catch-up attempt.
+#[inline]
+pub fn inc_app_shard_sync(outcome: &'static str) {
+    counter!("engine_app_shard_sync_total", "outcome" => outcome).increment(1);
 }
 #[inline]
 pub fn record_root_verification(matched: bool) {

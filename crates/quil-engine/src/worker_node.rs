@@ -138,7 +138,8 @@ pub struct WorkerOnlyNode {
     /// Optional receiver for engine events — consumed by the
     /// publish pump when proxy mode is enabled. When `None`, the
     /// worker runs receive-only (legacy behavior).
-    engine_event_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::app_engine::AppEngineEvent>>>,
+    engine_event_rx:
+        std::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::app_engine::AppEngineEvent>>>,
     /// Optional publish path (via master's PubSubProxy). When set,
     /// engine-produced messages are forwarded to the master for
     /// broadcast.
@@ -393,7 +394,10 @@ impl WorkerOnlyNode {
         let ipc_service = DataIpcServiceImpl {
             worker: self.clone(),
         };
-        let listen_addr = self.config.listen_addr.parse()
+        let listen_addr = self
+            .config
+            .listen_addr
+            .parse()
             .map_err(|e| QuilError::Internal(format!("bad listen addr: {}", e)))?;
 
         let server_cancel = self.cancel.clone();
@@ -414,7 +418,11 @@ impl WorkerOnlyNode {
             _ => None,
         };
         let server_handle = tokio::spawn(async move {
-            info!("DataIPC gRPC server starting on {} (mtls={})", listen_addr, channel_tls.is_some());
+            info!(
+                "DataIPC gRPC server starting on {} (mtls={})",
+                listen_addr,
+                channel_tls.is_some()
+            );
             let mut builder = Server::builder()
                 // Reap dead master connections (h2 PING) so a master that
                 // dies without FIN doesn't leave the stream fd behind.
@@ -456,7 +464,8 @@ impl WorkerOnlyNode {
                     factory,
                     worker_ref,
                     stream_cancel,
-                ).await;
+                )
+                .await;
             });
         } else {
             info!("no channel factory — worker will not stream from master");
@@ -594,8 +603,10 @@ impl WorkerOnlyNode {
                                             let syncing = syncing_filters.clone();
                                             let worker = worker_for_pump.clone();
                                             tokio::spawn(async move {
+                                                crate::metrics::inc_app_shard_sync("attempted");
                                                 match syncer.sync_shard_tree(&filter, &expected_roots).await {
                                                     Ok(true) => {
+                                                        crate::metrics::inc_app_shard_sync("converged");
                                                         tracing::info!(synced_to_frame, "shard catch-up sync converged");
                                                         // Tell the engine to fast-forward
                                                         // its materialized cursor + drop
@@ -606,8 +617,14 @@ impl WorkerOnlyNode {
                                                             }
                                                         }
                                                     }
-                                                    Ok(false) => tracing::warn!("shard catch-up sync did not converge"),
-                                                    Err(e) => tracing::warn!(error = %e, "shard catch-up sync failed"),
+                                                    Ok(false) => {
+                                                        crate::metrics::inc_app_shard_sync("not_converged");
+                                                        tracing::warn!("shard catch-up sync did not converge");
+                                                    }
+                                                    Err(e) => {
+                                                        crate::metrics::inc_app_shard_sync("failed");
+                                                        tracing::warn!(error = %e, "shard catch-up sync failed");
+                                                    }
                                                 }
                                                 syncing.lock().unwrap().remove(&filter);
                                             });
@@ -739,12 +756,8 @@ impl WorkerOnlyNode {
             unified_cutover_hook: None,
         };
 
-        let (engine, handle) = AppConsensusEngine::new(
-            core_id,
-            filter.clone(),
-            deps,
-            self.engine_event_tx.clone(),
-        );
+        let (engine, handle) =
+            AppConsensusEngine::new(core_id, filter.clone(), deps, self.engine_event_tx.clone());
 
         // Store handle for message routing
         {
@@ -772,7 +785,9 @@ impl WorkerOnlyNode {
     /// worker-owned p2p handle. Tracks the subscriptions so the next
     /// respawn can unsubscribe them.
     async fn subscribe_to_shard_bitmasks(&self, filter: &[u8]) {
-        let Some(p2p) = self.worker_p2p.clone() else { return };
+        let Some(p2p) = self.worker_p2p.clone() else {
+            return;
+        };
         let bitmasks = vec![
             crate::bitmasks::shard_frame_bitmask(filter),
             crate::bitmasks::shard_consensus_bitmask(filter),
@@ -799,7 +814,9 @@ impl WorkerOnlyNode {
     /// Inverse of [`Self::subscribe_to_shard_bitmasks`]. Idempotent —
     /// safe to call when nothing was previously subscribed.
     async fn unsubscribe_active_shards(&self) {
-        let Some(p2p) = self.worker_p2p.clone() else { return };
+        let Some(p2p) = self.worker_p2p.clone() else {
+            return;
+        };
         let previous: Vec<Vec<u8>> = {
             let mut tracked = self.active_shard_subscriptions.lock().unwrap();
             std::mem::take(&mut *tracked)
@@ -827,7 +844,9 @@ impl WorkerOnlyNode {
                 }
             }
         };
-        let Some(header) = frame.header.as_ref() else { return };
+        let Some(header) = frame.header.as_ref() else {
+            return;
+        };
         let expected = &header.prover_tree_commitment;
         if expected.is_empty() {
             return;
@@ -871,16 +890,14 @@ impl WorkerOnlyNode {
     /// syncer up to 3 times with 500ms delay, checks convergence,
     /// refreshes the prover registry after each attempt. The 5-frame
     /// cooldown (`sync_cooldown_until`) prevents sync-storms.
-    async fn perform_blocking_prover_sync(
-        &self,
-        frame_number: u64,
-        expected_roots: &[Vec<u8>],
-    ) {
+    async fn perform_blocking_prover_sync(&self, frame_number: u64, expected_roots: &[Vec<u8>]) {
         const MAX_ATTEMPTS: usize = 3;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
         const COOLDOWN_FRAMES: u64 = 5;
 
-        let cooldown = self.sync_cooldown_until.load(std::sync::atomic::Ordering::Relaxed);
+        let cooldown = self
+            .sync_cooldown_until
+            .load(std::sync::atomic::Ordering::Relaxed);
         if frame_number < cooldown {
             tracing::debug!(
                 frame = frame_number,
@@ -891,7 +908,9 @@ impl WorkerOnlyNode {
         }
 
         let Some(syncer) = self.prover_tree_syncer.as_ref() else {
-            warn!("prover tree sync: no syncer wired — worker will run with stale/empty prover tree");
+            warn!(
+                "prover tree sync: no syncer wired — worker will run with stale/empty prover tree"
+            );
             return;
         };
 
@@ -905,17 +924,11 @@ impl WorkerOnlyNode {
         for attempt in 0..MAX_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(RETRY_DELAY).await;
-                info!(
-                    attempt = attempt + 1,
-                    "retrying prover tree sync"
-                );
+                info!(attempt = attempt + 1, "retrying prover tree sync");
             }
             match syncer.sync_prover_tree(expected_roots).await {
                 Ok(true) => {
-                    info!(
-                        attempt = attempt + 1,
-                        "prover tree sync converged"
-                    );
+                    info!(attempt = attempt + 1, "prover tree sync converged");
                     // Refresh the prover registry from the just-synced store.
                     self.refresh_registry();
                     self.sync_cooldown_until.store(
@@ -1059,16 +1072,12 @@ struct DataIpcServiceImpl {
 }
 
 #[tonic::async_trait]
-impl quil_types::proto::node::data_ipc_service_server::DataIpcService
-    for DataIpcServiceImpl
-{
+impl quil_types::proto::node::data_ipc_service_server::DataIpcService for DataIpcServiceImpl {
     async fn respawn(
         &self,
         request: tonic::Request<quil_types::proto::node::RespawnRequest>,
-    ) -> std::result::Result<
-        tonic::Response<quil_types::proto::node::RespawnResponse>,
-        tonic::Status,
-    > {
+    ) -> std::result::Result<tonic::Response<quil_types::proto::node::RespawnResponse>, tonic::Status>
+    {
         let filter = request.into_inner().filter;
         match self.worker.respawn(filter).await {
             Ok(()) => Ok(tonic::Response::new(
@@ -1143,17 +1152,22 @@ async fn stream_global_messages_from_master(
             return;
         }
 
-        info!(endpoint = master_endpoint, "connecting to master for message stream");
+        info!(
+            endpoint = master_endpoint,
+            "connecting to master for message stream"
+        );
 
         match channel_factory().await {
             Ok(channel) => {
                 info!("connected to master, starting message stream");
                 backoff = Duration::from_secs(1); // reset backoff
 
-                let mut client = quil_types::proto::global::global_service_client::GlobalServiceClient::new(channel);
-                let request = tonic::Request::new(
-                    quil_types::proto::global::StreamGlobalMessagesRequest {},
-                );
+                let mut client =
+                    quil_types::proto::global::global_service_client::GlobalServiceClient::new(
+                        channel,
+                    );
+                let request =
+                    tonic::Request::new(quil_types::proto::global::StreamGlobalMessagesRequest {});
 
                 match client.stream_global_messages(request).await {
                     Ok(response) => {
@@ -1285,8 +1299,8 @@ pub fn worker_listen_addr(
     // Tier 2 / 3: construct from template. Core 1 → base_stream_port,
     // core 2 → base_stream_port + 1, etc. Use the template's `%d`
     // replacement so the host portion matches what the operator configured.
-    let port = base_stream_port
-        .saturating_add(core_id.saturating_sub(1).min(u16::MAX as u32) as u16);
+    let port =
+        base_stream_port.saturating_add(core_id.saturating_sub(1).min(u16::MAX as u32) as u16);
     if base_listen.contains("%d") {
         // Template has `%d` — build a multiaddr, then extract `host:port`
         // so the return value is always a socket address (the caller

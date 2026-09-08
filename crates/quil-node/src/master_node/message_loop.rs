@@ -9,9 +9,8 @@ pub(crate) struct MessageLoopArgs {
     pub exec_manager: Arc<quil_execution::ExecutionEngineManager>,
     pub msg_rx: tokio::sync::mpsc::Receiver<quil_p2p::node::ReceivedMessage>,
     pub consensus_loopback_rx: tokio::sync::mpsc::Receiver<quil_p2p::node::ReceivedMessage>,
-    pub global_msg_tx: tokio::sync::broadcast::Sender<
-        quil_types::proto::global::StreamGlobalMessagesResponse,
-    >,
+    pub global_msg_tx:
+        tokio::sync::broadcast::Sender<quil_types::proto::global::StreamGlobalMessagesResponse>,
     pub archive_pool: Arc<quil_rpc::ArchiveEndpointPool>,
     pub mtls_seed: Option<[u8; 57]>,
     /// The FALCON network-identity signing key (`q-prover-key`) for outbound
@@ -28,14 +27,14 @@ pub(crate) struct MessageLoopArgs {
     /// Commonware-simplex inbound router (P2c cutover), set post-spawn at the
     /// activation site when `config.engine.consensus_committee` is non-empty.
     /// Unset (the default) → the simplex path is off and this adds no overhead.
-    pub cw_router:
-        Arc<std::sync::OnceLock<Arc<crate::cw_consensus_bridge::CwInboundRouter>>>,
-    pub peer_info_cache: Arc<parking_lot::RwLock<
-        std::collections::HashMap<Vec<u8>, quil_p2p::CanonicalPeerInfo>,
-    >>,
-    pub shard_engines: Arc<parking_lot::RwLock<
-        std::collections::HashMap<Vec<u8>, quil_engine::app_engine::AppEngineHandle>,
-    >>,
+    pub cw_router: Arc<std::sync::OnceLock<Arc<crate::cw_consensus_bridge::CwInboundRouter>>>,
+    pub peer_info_cache:
+        Arc<parking_lot::RwLock<std::collections::HashMap<Vec<u8>, quil_p2p::CanonicalPeerInfo>>>,
+    pub shard_engines: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<Vec<u8>, quil_engine::app_engine::AppEngineHandle>,
+        >,
+    >,
     pub signer_registry: Arc<quil_p2p::SignerRegistry>,
     pub current_frame: Arc<quil_engine::current_frame::CurrentFrame>,
     pub last_global_head_frame: Arc<std::sync::atomic::AtomicU64>,
@@ -62,8 +61,7 @@ pub(crate) struct MessageLoopArgs {
     /// Archive-only: ingests full app-shard frames received on the bulk
     /// shard subscription and materializes them into the archive's CRDT.
     /// `None` on non-archive nodes.
-    pub archive_app_shard_ingest:
-        Option<quil_engine::archive_ingest::ArchiveAppShardIngest>,
+    pub archive_app_shard_ingest: Option<quil_engine::archive_ingest::ArchiveAppShardIngest>,
     /// Explorer recent-message ring. `Some` only when the explorer service
     /// is enabled; every inbound gossip message is recorded for the
     /// `GET /messages` endpoint. `None` (the default) means no overhead.
@@ -141,7 +139,8 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
     );
     let router_for_recv = message_router.clone();
 
-    let reward_issuer: Arc<quil_engine::OptRewardIssuance> = Arc::new(quil_engine::OptRewardIssuance);
+    let reward_issuer: Arc<quil_engine::OptRewardIssuance> =
+        Arc::new(quil_engine::OptRewardIssuance);
     let archive_mode_for_recv: bool = archive_mode_recv;
 
     // Bundle every cache/map we want to size-report in the 30s
@@ -1270,25 +1269,30 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                         .collect()
                                 };
                                 let mut routed = false;
+                                let mut routed_kind: Option<&'static str> = None;
                                 for (filter, handle) in &entries {
                                     if bm == quil_engine::bitmasks::shard_consensus_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Consensus(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("consensus");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_frame_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Frame(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("frame");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_prover_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Prover(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("prover");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_dispatch_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Dispatch(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("dispatch");
                                         break;
                                     }
                                     // (P3) Commonware-simplex shard traffic. Split the
@@ -1318,8 +1322,12 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                             });
                                         }
                                         routed = true;
+                                        routed_kind = Some("cw");
                                         break;
                                     }
+                                }
+                                if let Some(kind) = routed_kind {
+                                    quil_engine::metrics::inc_app_shard_router_message(kind);
                                 }
                                 if !routed {
                                     // CLUSTER MASTER: a full app-shard frame the master received
