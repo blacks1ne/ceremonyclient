@@ -119,6 +119,134 @@ async fn fetch_changed_blobs(
     Ok(fetched)
 }
 
+/// REPAIR the readable-data half of a shard/phase whose COMMITMENT this node
+/// already holds: audit its committed leaves against the blob keyspace, pull
+/// whatever is missing from `client`, verify each blob against its committed
+/// `commitment ‖ size`, and install it WITHOUT touching the tree.
+///
+/// Why this cannot be left to [`sync_one_phase`]: the diff only transfers leaves
+/// that DIFFER. A node whose tree is byte-identical to the peer's but whose blob
+/// keyspace has holes therefore short-circuits on the root check forever and
+/// never re-fetches the missing data — the hole is permanent, and only vertices
+/// a later frame happens to rewrite recover. Holes of exactly this shape were
+/// produced by the pre-atomic sync install, which committed the tree first and
+/// fetched blobs afterwards, so any error in the fetch loop left a complete tree
+/// with no data behind it. `apply_prepared_shard_phase_sync` stops NEW holes
+/// from forming; it cannot heal one that already exists.
+///
+/// BEST-EFFORT: a peer that will not serve a blob, or serves one that does not
+/// match our committed leaf, is warned about and skipped rather than failing the
+/// sync — the caller's tree is already correct, and repair retries on the next
+/// tick against whichever peer it picks. Only a fully-filled audit marks the
+/// tree clean, so a partial repair keeps trying.
+async fn repair_missing_blobs(
+    client: &mut ArchiveClient,
+    crdt: &Arc<quil_hypergraph::HypergraphCrdt>,
+    shard_id: &[u8],
+    phase: u32,
+    source_version: u64,
+) -> Result<()> {
+    // One sweep per tree per process — the audit is O(leaves) and the steady
+    // state after the first clean pass must stay free.
+    if !crdt.blob_audit_pending(shard_id, phase as usize) {
+        return Ok(());
+    }
+    let c = crdt.clone();
+    let sid = shard_id.to_vec();
+    let missing = tokio::task::spawn_blocking(move || c.missing_vertex_blobs(&sid, phase as usize))
+        .await
+        .map_err(|e| QuilError::Internal(format!("blob audit join: {e}")))??;
+    if missing.is_empty() {
+        crdt.mark_blob_audit_clean(shard_id, phase as usize);
+        return Ok(());
+    }
+    let Some(shard) = app_shard_key(shard_id) else { return Ok(()) };
+    warn!(
+        phase,
+        shard = %hex::encode(&shard_id[..32.min(shard_id.len())]),
+        gaps = missing.len(),
+        "committed leaves with missing or mismatched vertex blobs — repairing from peer",
+    );
+    let shard_key_bytes: Vec<u8> = shard.l1.iter().copied().chain(shard.l2).collect();
+    let mut fetched: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut unfilled = 0usize;
+    for (key_hash, leaf_value) in &missing {
+        let mut vertex_id = shard.l2.to_vec();
+        vertex_id.extend_from_slice(key_hash);
+        let blob = match client
+            .get_vertex_blob(shard_key_bytes.clone(), phase, vertex_id.clone(), source_version)
+            .await
+        {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                unfilled += 1;
+                continue;
+            }
+            Err(e) => return Err(QuilError::Internal(format!("get_vertex_blob: {e}"))),
+        };
+        // SECURITY: identical binding to the sync path — the served bytes must
+        // hash to the leaf value THIS node committed, so a peer cannot use the
+        // repair channel to inject data unbound to our authenticated root. A
+        // mismatch here is most often the peer having advanced past the version
+        // we audited, so it is a skip-and-retry, not an abort.
+        let recomputed = quil_tries::vertex_leaf_value(&blob)
+            .map_err(|e| QuilError::Internal(format!("vertex_leaf_value: {e}")))?;
+        if &recomputed != leaf_value {
+            warn!(
+                phase,
+                vertex = %hex::encode(&vertex_id),
+                "repair blob does not match the locally committed commitment‖size — skipping",
+            );
+            unfilled += 1;
+            continue;
+        }
+        fetched.push((vertex_id, blob));
+    }
+    let repaired = fetched.len();
+    if repaired > 0 {
+        let c = crdt.clone();
+        let sid = shard_id.to_vec();
+        tokio::task::spawn_blocking(move || c.install_vertex_blobs(&sid, phase as usize, &fetched))
+            .await
+            .map_err(|e| QuilError::Internal(format!("blob install join: {e}")))??;
+    }
+    if unfilled == 0 {
+        crdt.mark_blob_audit_clean(shard_id, phase as usize);
+    }
+    warn!(phase, repaired, unfilled, "vertex blob repair pass complete");
+    Ok(())
+}
+
+/// Run [`repair_missing_blobs`] against `client` at ITS current head version,
+/// for paths that ABANDON the anchored pull.
+///
+/// The repair does not depend on the anchor. It works from leaves this node has
+/// already committed and validates every fetched blob against OUR OWN leaf
+/// value, so a peer that cannot serve the anchored version — the common
+/// `resolve_root` miss, where the peer has pruned past the header root we are
+/// pinned to — can still close data holes. Without this the repair would be
+/// gated behind a pull that, on a node stuck in exactly that state, never
+/// succeeds.
+async fn repair_at_peer_head(
+    client: &mut ArchiveClient,
+    crdt: &Arc<quil_hypergraph::HypergraphCrdt>,
+    shard_id: &[u8],
+    phase: u32,
+) {
+    if !crdt.blob_audit_pending(shard_id, phase as usize) {
+        return;
+    }
+    match client.get_forest_head(shard_id.to_vec(), phase).await {
+        Ok(Some((v_s, _))) => {
+            if let Err(e) = repair_missing_blobs(client, crdt, shard_id, phase, v_s).await {
+                warn!(phase, error = %e, "vertex blob repair failed — retrying next sync");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => warn!(phase, error = %e, "head lookup for vertex blob repair failed"),
+    }
+}
+
 /// Sync ONE forest tree's phase from a peer: diff + apply the commitment, then
 /// pull the changed vertices' blobs. Returns the new root (for the caller to
 /// verify, if it has an expected root).
@@ -137,6 +265,18 @@ pub async fn sync_one_phase(
     // doing it). `None` (peer root unknown) always diffs.
     remote_root: Option<[u8; 32]>,
 ) -> Result<[u8; 32]> {
+    // Repair FIRST, before anything that can fail. The blob keyspace is a
+    // separate store the diff never inspects, so a data hole survives both
+    // outcomes below: the root-match short-circuit returns without looking, and
+    // a diff that loses the version race aborts before any blob work. Neither is
+    // rare — a node whose commitment is already correct takes the first path
+    // every tick, and a node catching up takes the second — so gating the repair
+    // on a successful pull leaves it never running on precisely the nodes that
+    // need it. The audit is one sweep per tree per process; afterwards this is a
+    // flag check.
+    if let Err(e) = repair_missing_blobs(client, crdt, shard_id, phase, source_version).await {
+        warn!(phase, error = %e, "vertex blob repair failed — retrying next sync");
+    }
     // (#1) Cheap root-check short-circuit. `compute_shard_root` is a plain
     // forest read (no recompute); when it matches the peer root there is nothing
     // to sync — return it without touching the diff or the forest lock.
@@ -306,6 +446,13 @@ pub async fn sync_shard_phases_verified(
                             anchor = %hex::encode(exp),
                             "peer has no version for the authenticated phase-0 anchor (behind/pruned) — trying another peer",
                         );
+                        // The anchored PULL is off, but the leaf-blob repair is
+                        // not anchored — it fixes leaves we already committed
+                        // and binds each blob to our own leaf value. A node
+                        // whose peers have all pruned past its header anchor
+                        // takes this branch forever, so this is the only place
+                        // its repair can happen.
+                        repair_at_peer_head(&mut client, &crdt, shard_id, phase).await;
                         return Ok(None);
                     }
                     // Auxiliary phase: accept ONLY if the anchor is the peer's
@@ -323,6 +470,7 @@ pub async fn sync_shard_phases_verified(
                                 anchor = %hex::encode(exp),
                                 "peer cannot serve the anchored phase version — trying another peer",
                             );
+                            repair_at_peer_head(&mut client, &crdt, shard_id, phase).await;
                             return Ok(None);
                         }
                     }
