@@ -617,7 +617,7 @@ fn a_fully_materialized_shard_audits_clean() {
 
     assert!(crdt.missing_vertex_blobs(&shard_id, 0).unwrap().is_empty());
     assert!(crdt.blob_audit_pending(&shard_id, 0), "pending until something marks it");
-    crdt.mark_blob_audit_clean(&shard_id, 0);
+    crdt.mark_blob_audit_done(&shard_id, 0);
     assert!(!crdt.blob_audit_pending(&shard_id, 0), "a clean tree is swept once, not per tick");
     assert!(
         crdt.blob_audit_pending(&shard_id, 1),
@@ -684,4 +684,76 @@ fn tombstone_leaves_are_never_reported_as_gaps() {
             "phase {phase} of a self-materialized shard with removes must audit clean",
         );
     }
+}
+
+/// THE COST BUG THIS GUARDS: a leaf no peer can serve must not keep an
+/// O(leaves) sweep plus one RPC per gap running on every sync tick forever.
+///
+/// The live case is a STALE LEAF — this node's tree has not converged, so it
+/// commits to a revision the peer no longer holds and the commitment binding
+/// correctly rejects the peer's current blob. Measured on L1: 4915 of 5124 gaps
+/// filled, 209 permanently unfillable, and under the original "only a fully
+/// filled audit marks the tree clean" rule those 209 re-ran the entire
+/// nine-and-a-half-minute pass on every tick.
+#[test]
+fn an_unfillable_leaf_is_offered_once_and_then_skipped() {
+    let leader = fresh_crdt();
+    seed_and_commit(&leader, 3, 1);
+    let shard_id = GLOBAL_APP.to_vec();
+    let follower = fresh_crdt();
+    sync_prover_phase0(&follower, leader.clone());
+
+    let missing = follower.pending_blob_repairs(&shard_id, 0).unwrap();
+    assert_eq!(missing.len(), 3, "a tree-only install leaves every leaf without data");
+
+    // A peer serves one of the three; the other two it cannot.
+    let blobs = fetch_repair_blobs(&leader, &missing[..1]);
+    follower.install_vertex_blobs(&shard_id, 0, &blobs).unwrap();
+    for (key_hash, leaf_value) in &missing[1..] {
+        follower.mark_blob_unfillable(&shard_id, 0, *key_hash, leaf_value.clone());
+    }
+
+    // The raw audit still reports them — it is the honest answer about data.
+    assert_eq!(
+        follower.missing_vertex_blobs(&shard_id, 0).unwrap().len(),
+        2,
+        "the audit must not lie about a leaf having no readable data",
+    );
+    // The repair list does not: there is nothing left to spend an RPC on.
+    assert!(
+        follower.pending_blob_repairs(&shard_id, 0).unwrap().is_empty(),
+        "an already-refused leaf must not be requested again",
+    );
+}
+
+/// The skip is bound to the LEAF VALUE, not the leaf. A leaf that was
+/// unfillable because our tree was behind comes back into scope the moment the
+/// tree moves it on — otherwise one transient miss would suppress the repair
+/// for that vertex for the rest of the process.
+#[test]
+fn a_moved_leaf_is_offered_again_after_being_marked_unfillable() {
+    let leader = fresh_crdt();
+    seed_and_commit(&leader, 2, 1);
+    let shard_id = GLOBAL_APP.to_vec();
+    let follower = fresh_crdt();
+    sync_prover_phase0(&follower, leader.clone());
+
+    let missing = follower.pending_blob_repairs(&shard_id, 0).unwrap();
+    assert_eq!(missing.len(), 2);
+    for (key_hash, leaf_value) in &missing {
+        follower.mark_blob_unfillable(&shard_id, 0, *key_hash, leaf_value.clone());
+    }
+    assert!(follower.pending_blob_repairs(&shard_id, 0).unwrap().is_empty());
+
+    // The leader rewrites vertex 0 and the follower's tree converges onto the
+    // new leaf value. The stale verdict no longer describes this leaf.
+    leader.add_vertex(&seeded_location(0), b"rewritten payload for vertex 0").unwrap();
+    leader.commit(2).unwrap();
+    sync_prover_phase0(&follower, leader.clone());
+
+    // The leaf's `key_hash` IS the vertex's data address, so name it directly
+    // rather than relying on the sweep's ordering.
+    let again = follower.pending_blob_repairs(&shard_id, 0).unwrap();
+    assert_eq!(again.len(), 1, "only the leaf that moved is offered again");
+    assert_eq!(again[0].0, seeded_location(0).data_address);
 }

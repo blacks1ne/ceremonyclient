@@ -17,7 +17,14 @@ use quil_hypergraph::addressing::get_bloom_filter_indices;
 use quil_rpc::{ArchiveClient, RemoteTreeReader};
 use quil_types::error::{QuilError, Result};
 use quil_types::store::ShardKey;
-use tracing::warn;
+use tracing::{debug, warn};
+
+/// Ceiling on blobs requested by ONE [`repair_missing_blobs`] pass. The fetch is
+/// a sequential RPC per gap running inline in the sync, so the gap list sets the
+/// sync's latency: 5124 gaps measured at ~9.5 minutes on L1. The remainder is
+/// picked up on the next tick, so a large hole still closes — it just does not
+/// stall one sync while it does.
+const MAX_BLOB_REPAIRS_PER_PASS: usize = 2048;
 
 /// `(set, phase)` string pair — the blob keyspace keying, matching the CRDT.
 pub(crate) fn phase_strs(phase: u32) -> (&'static str, &'static str) {
@@ -137,8 +144,16 @@ async fn fetch_changed_blobs(
 /// BEST-EFFORT: a peer that will not serve a blob, or serves one that does not
 /// match our committed leaf, is warned about and skipped rather than failing the
 /// sync — the caller's tree is already correct, and repair retries on the next
-/// tick against whichever peer it picks. Only a fully-filled audit marks the
-/// tree clean, so a partial repair keeps trying.
+/// tick against whichever peer it picks.
+///
+/// BOUNDED: at most [`MAX_BLOB_REPAIRS_PER_PASS`] blobs are requested per call,
+/// because the fetch is one sequential RPC per gap and runs INLINE in
+/// [`sync_one_phase`] — an unbounded pass delays the sync it is attached to for
+/// as long as the gap list is long (5124 gaps measured at ~9.5 minutes). A pass
+/// cut short leaves the tree pending so the next tick continues; a pass that
+/// considered every gap marks it done even if some could not be filled, since
+/// each of those is recorded as unfillable and would otherwise re-run the whole
+/// sweep on every tick forever.
 async fn repair_missing_blobs(
     client: &mut ArchiveClient,
     crdt: &Arc<quil_hypergraph::HypergraphCrdt>,
@@ -147,30 +162,34 @@ async fn repair_missing_blobs(
     source_version: u64,
 ) -> Result<()> {
     // One sweep per tree per process — the audit is O(leaves) and the steady
-    // state after the first clean pass must stay free.
+    // state after the first pass must stay free.
     if !crdt.blob_audit_pending(shard_id, phase as usize) {
         return Ok(());
     }
     let c = crdt.clone();
     let sid = shard_id.to_vec();
-    let missing = tokio::task::spawn_blocking(move || c.missing_vertex_blobs(&sid, phase as usize))
-        .await
-        .map_err(|e| QuilError::Internal(format!("blob audit join: {e}")))??;
+    let missing =
+        tokio::task::spawn_blocking(move || c.pending_blob_repairs(&sid, phase as usize))
+            .await
+            .map_err(|e| QuilError::Internal(format!("blob audit join: {e}")))??;
     if missing.is_empty() {
-        crdt.mark_blob_audit_clean(shard_id, phase as usize);
+        crdt.mark_blob_audit_done(shard_id, phase as usize);
         return Ok(());
     }
     let Some(shard) = app_shard_key(shard_id) else { return Ok(()) };
+    let attempting = missing.len().min(MAX_BLOB_REPAIRS_PER_PASS);
+    let deferred = missing.len() - attempting;
     warn!(
         phase,
         shard = %hex::encode(&shard_id[..32.min(shard_id.len())]),
         gaps = missing.len(),
+        attempting,
         "committed leaves with missing or mismatched vertex blobs — repairing from peer",
     );
     let shard_key_bytes: Vec<u8> = shard.l1.iter().copied().chain(shard.l2).collect();
     let mut fetched: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut unfilled = 0usize;
-    for (key_hash, leaf_value) in &missing {
+    for (key_hash, leaf_value) in missing.iter().take(attempting) {
         let mut vertex_id = shard.l2.to_vec();
         vertex_id.extend_from_slice(key_hash);
         let blob = match client
@@ -179,6 +198,12 @@ async fn repair_missing_blobs(
         {
             Ok(Some(b)) => b,
             Ok(None) => {
+                crdt.mark_blob_unfillable(
+                    shard_id,
+                    phase as usize,
+                    *key_hash,
+                    leaf_value.clone(),
+                );
                 unfilled += 1;
                 continue;
             }
@@ -186,17 +211,23 @@ async fn repair_missing_blobs(
         };
         // SECURITY: identical binding to the sync path — the served bytes must
         // hash to the leaf value THIS node committed, so a peer cannot use the
-        // repair channel to inject data unbound to our authenticated root. A
-        // mismatch here is most often the peer having advanced past the version
-        // we audited, so it is a skip-and-retry, not an abort.
+        // repair channel to inject data unbound to our authenticated root.
+        //
+        // A mismatch is normally a STALE LEAF on our side rather than a bad
+        // peer: our tree has not converged, so it commits to a revision the peer
+        // no longer holds. Peer versions are per-node counters and cannot
+        // address our revision, so there is nothing to retry — record it against
+        // this leaf value and move on. Tree convergence is what closes these,
+        // and when it does the leaf value changes and the record stops matching.
         let recomputed = quil_tries::vertex_leaf_value(&blob)
             .map_err(|e| QuilError::Internal(format!("vertex_leaf_value: {e}")))?;
         if &recomputed != leaf_value {
-            warn!(
+            debug!(
                 phase,
                 vertex = %hex::encode(&vertex_id),
                 "repair blob does not match the locally committed commitment‖size — skipping",
             );
+            crdt.mark_blob_unfillable(shard_id, phase as usize, *key_hash, leaf_value.clone());
             unfilled += 1;
             continue;
         }
@@ -210,10 +241,12 @@ async fn repair_missing_blobs(
             .await
             .map_err(|e| QuilError::Internal(format!("blob install join: {e}")))??;
     }
-    if unfilled == 0 {
-        crdt.mark_blob_audit_clean(shard_id, phase as usize);
+    // Every gap this pass looked at is now either filled or recorded, so there
+    // is nothing further to try — UNLESS the budget cut the pass short.
+    if deferred == 0 {
+        crdt.mark_blob_audit_done(shard_id, phase as usize);
     }
-    warn!(phase, repaired, unfilled, "vertex blob repair pass complete");
+    warn!(phase, repaired, unfilled, deferred, "vertex blob repair pass complete");
     Ok(())
 }
 
