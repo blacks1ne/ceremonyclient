@@ -1270,25 +1270,30 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                         .collect()
                                 };
                                 let mut routed = false;
+                                let mut routed_kind: Option<&'static str> = None;
                                 for (filter, handle) in &entries {
                                     if bm == quil_engine::bitmasks::shard_consensus_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Consensus(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("consensus");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_frame_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Frame(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("frame");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_prover_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Prover(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("prover");
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_dispatch_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Dispatch(received.data.clone()));
                                         routed = true;
+                                        routed_kind = Some("dispatch");
                                         break;
                                     }
                                     // (P3) Commonware-simplex shard traffic. Split the
@@ -1318,8 +1323,12 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                             });
                                         }
                                         routed = true;
+                                        routed_kind = Some("cw");
                                         break;
                                     }
+                                }
+                                if let Some(kind) = routed_kind {
+                                    quil_engine::metrics::inc_app_shard_router_message(kind);
                                 }
                                 if !routed {
                                     // CLUSTER MASTER: a full app-shard frame the master received

@@ -213,6 +213,10 @@ impl InMemoryProverRegistry {
         }
 
         // Two-pass walk: first collect provers, then collect allocations.
+        // Keep decoder rejections by address so an allocation that needs a
+        // synthetic parent can distinguish an absent vertex from a malformed
+        // one. This is diagnostic-only; cache semantics stay unchanged.
+        let mut rejected_provers: HashMap<Vec<u8>, (&'static str, usize)> = HashMap::new();
         // The iterator order is arbitrary, so if we did it in one pass
         // we'd need to synthesize stubs when an allocation arrives
         // before its prover. Two passes are cleaner.
@@ -235,6 +239,18 @@ impl InMemoryProverRegistry {
                     self.prover_vertex_count += 1;
                     if let Some(info) = decode_prover(vk, &root) {
                         self.prover_cache.insert(info.address.clone(), info);
+                    } else {
+                        let public_key = read_bytes(&root, "prover:Prover", "PublicKey");
+                        let status = field_key("prover:Prover", "Status")
+                            .and_then(|key| root.find_leaf_value(&key));
+                        let reason = if public_key.is_empty() {
+                            "empty_public_key"
+                        } else if status.as_ref().is_none_or(|value| value.len() != 1) {
+                            "missing_or_malformed_status"
+                        } else {
+                            "unsupported_status"
+                        };
+                        rejected_provers.insert(vk[32..].to_vec(), (reason, public_key.len()));
                     }
                 }
                 Some("reward:ProverReward") => {
@@ -276,7 +292,23 @@ impl InMemoryProverRegistry {
             let Some((prover_ref, alloc)) = decode_allocation(vk, &root) else {
                 continue;
             };
-            // Find or synthesize the parent prover.
+            // Find or synthesize the parent prover. A synthetic parent has
+            // no usable consensus key, so it cannot participate in CW. Log the
+            // source precisely: its prover vertex was absent from this refresh,
+            // or present but rejected by the prover decoder.
+            if !self.prover_cache.contains_key(&prover_ref) {
+                let (parent_vertex_state, stored_public_key_len) = rejected_provers
+                    .get(&prover_ref)
+                    .copied()
+                    .unwrap_or(("absent", 0));
+                tracing::warn!(
+                    prover_address = %hex::encode(&prover_ref),
+                    confirmation_filter = %hex::encode(&alloc.confirmation_filter),
+                    parent_vertex_state,
+                    stored_public_key_len,
+                    "registry synthesizing prover from allocation without usable parent vertex"
+                );
+            }
             let prover_entry = self
                 .prover_cache
                 .entry(prover_ref.clone())

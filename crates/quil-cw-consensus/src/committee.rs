@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use commonware_utils::ordered::Set;
+use commonware_cryptography::{Hasher as _, Sha256};
 
 use crate::falcon_base::{FalconPrivateKey, FalconPublicKey};
 use crate::falcon_simplex::SimplexFalconScheme;
@@ -17,6 +18,32 @@ use crate::falcon_simplex::SimplexFalconScheme;
 pub struct GlobalCommittee {
     pub peers: Arc<[FalconPublicKey]>,
     pub scheme: SimplexFalconScheme,
+}
+
+/// The stage at which commonware committee construction was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitteeBuildError {
+    Empty,
+    MalformedMemberKey {
+        index: usize,
+        len: usize,
+        fingerprint: [u8; 8],
+    },
+    DuplicateMemberKey,
+    InvalidLocalKeyPair,
+    SignerRejected,
+}
+
+impl CommitteeBuildError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::MalformedMemberKey { .. } => "malformed_member_key",
+            Self::DuplicateMemberKey => "duplicate_member_key",
+            Self::InvalidLocalKeyPair => "invalid_local_key_pair",
+            Self::SignerRejected => "signer_rejected",
+        }
+    }
 }
 
 /// Build the committee from raw Falcon material.
@@ -34,20 +61,58 @@ pub fn build_global_committee(
     my_public_key: &[u8],
     namespace: &[u8],
 ) -> Option<GlobalCommittee> {
+    build_global_committee_diagnostic(
+        committee_pubkeys,
+        my_signing_key,
+        my_public_key,
+        namespace,
+    )
+    .ok()
+}
+
+/// As [`build_global_committee`], retaining the rejection reason for operators.
+pub fn build_global_committee_diagnostic(
+    committee_pubkeys: &[Vec<u8>],
+    my_signing_key: &[u8],
+    my_public_key: &[u8],
+    namespace: &[u8],
+) -> Result<GlobalCommittee, CommitteeBuildError> {
     let pks: Vec<FalconPublicKey> = committee_pubkeys
         .iter()
-        .map(|b| FalconPublicKey::from_bytes(b))
-        .collect::<Option<_>>()?;
+        .enumerate()
+        .map(|(index, b)| {
+            FalconPublicKey::from_bytes(b).ok_or_else(|| {
+                let mut hasher = Sha256::default();
+                hasher.update(b);
+                let digest = hasher.finalize();
+                let mut fingerprint = [0u8; 8];
+                fingerprint.copy_from_slice(&digest.as_ref()[..8]);
+                CommitteeBuildError::MalformedMemberKey {
+                    index,
+                    len: b.len(),
+                    fingerprint,
+                }
+            })
+        })
+        .collect::<Result<_, _>>()?;
     if pks.is_empty() {
-        return None;
+        return Err(CommitteeBuildError::Empty);
     }
-    let set: Set<FalconPublicKey> = pks.clone().try_into().ok()?;
+    if pks.iter().enumerate().any(|(i, key)| pks[..i].contains(key)) {
+        return Err(CommitteeBuildError::DuplicateMemberKey);
+    }
+    let set: Set<FalconPublicKey> = pks
+        .clone()
+        .try_into()
+        .map_err(|_| CommitteeBuildError::DuplicateMemberKey)?;
 
-    let private_key = FalconPrivateKey::from_bytes(my_signing_key, my_public_key)?;
+    let private_key = FalconPrivateKey::from_bytes(my_signing_key, my_public_key)
+        .ok_or(CommitteeBuildError::InvalidLocalKeyPair)?;
     // `signer` returns None if our key isn't in the participant set.
-    let scheme = SimplexFalconScheme::signer(namespace, set, private_key)?;
+    let scheme = SimplexFalconScheme::signer(namespace, set, private_key)
+        .ok_or(CommitteeBuildError::SignerRejected)?;
 
-    Some(GlobalCommittee {
+    Ok(GlobalCommittee {
         peers: Arc::from(pks),
         scheme,
     })

@@ -594,8 +594,10 @@ impl WorkerOnlyNode {
                                             let syncing = syncing_filters.clone();
                                             let worker = worker_for_pump.clone();
                                             tokio::spawn(async move {
+                                                crate::metrics::inc_app_shard_sync("attempted");
                                                 match syncer.sync_shard_tree(&filter, &expected_roots).await {
                                                     Ok(true) => {
+                                                        crate::metrics::inc_app_shard_sync("converged");
                                                         tracing::info!(synced_to_frame, "shard catch-up sync converged");
                                                         // Tell the engine to fast-forward
                                                         // its materialized cursor + drop
@@ -606,8 +608,14 @@ impl WorkerOnlyNode {
                                                             }
                                                         }
                                                     }
-                                                    Ok(false) => tracing::warn!("shard catch-up sync did not converge"),
-                                                    Err(e) => tracing::warn!(error = %e, "shard catch-up sync failed"),
+                                                    Ok(false) => {
+                                                        crate::metrics::inc_app_shard_sync("not_converged");
+                                                        tracing::warn!("shard catch-up sync did not converge");
+                                                    }
+                                                    Err(e) => {
+                                                        crate::metrics::inc_app_shard_sync("failed");
+                                                        tracing::warn!(error = %e, "shard catch-up sync failed");
+                                                    }
                                                 }
                                                 syncing.lock().unwrap().remove(&filter);
                                             });
