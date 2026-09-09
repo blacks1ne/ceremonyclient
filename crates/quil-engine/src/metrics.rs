@@ -82,6 +82,18 @@ pub fn register_engine_metrics() {
         "Total number of frames received over BlossomSub"
     );
     describe_counter!(
+        "engine_app_shard_router_messages_total",
+        "App-shard gossip messages routed to a local worker, labelled by message kind"
+    );
+    describe_counter!(
+        "engine_app_shard_full_frames_total",
+        "Full app-shard frames at each follower receive/materialization outcome, labelled by outcome"
+    );
+    describe_counter!(
+        "engine_app_shard_sync_total",
+        "App-shard catch-up sync attempts, labelled by outcome"
+    );
+    describe_counter!(
         "engine_prover_root_matches_total",
         "Root verification successes"
     );
@@ -217,6 +229,27 @@ pub fn inc_frames_materialized() {
 #[inline]
 pub fn inc_frames_received() {
     counter!("engine_frames_received_total").increment(1);
+}
+
+/// Record a shard gossip message after the master has matched it to a local
+/// worker. `kind` is a fixed protocol category, never a shard filter, so this
+/// cannot create unbounded metric cardinality.
+#[inline]
+pub fn inc_app_shard_router_message(kind: &'static str) {
+    counter!("engine_app_shard_router_messages_total", "kind" => kind).increment(1);
+}
+
+/// Record an app-frame receive/materialization outcome. Outcomes are a small,
+/// fixed vocabulary, not a shard filter.
+#[inline]
+pub fn inc_app_shard_full_frame(outcome: &'static str) {
+    counter!("engine_app_shard_full_frames_total", "outcome" => outcome).increment(1);
+}
+
+/// Record the result of an archive-backed app-shard catch-up attempt.
+#[inline]
+pub fn inc_app_shard_sync(outcome: &'static str) {
+    counter!("engine_app_shard_sync_total", "outcome" => outcome).increment(1);
 }
 #[inline]
 pub fn record_root_verification(matched: bool) {

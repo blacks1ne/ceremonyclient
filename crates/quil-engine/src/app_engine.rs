@@ -2155,7 +2155,7 @@ impl AppConsensusEngine {
                         // floor committee to the real N-member set), tear down the
                         // old simplex instance (fixed validator set) and rebuild
                         // with the new committee.
-                        let members = self.compute_committee_members();
+                        let (_, _, members) = self.compute_committee_members();
                         let fp = Self::committee_fp(&members);
                         if !members.is_empty() && Some(fp) != self.cw_committee_fp {
                             info!(
@@ -2230,22 +2230,26 @@ impl AppConsensusEngine {
     /// The current committee's member Falcon pubkeys, read at the GLOBAL anchor
     /// epoch (`committee_anchor_gfn`), matching the leader provider + produced/
     /// verified frames. Empty when unresolved (drives the passive-mode retry).
-    fn compute_committee_members(&self) -> Vec<Vec<u8>> {
+    fn compute_committee_members(&self) -> (u64, &'static str, Vec<Vec<u8>>) {
         let (committee_anchor, _) = resolve_global_anchor(self.global_anchor_store.as_ref());
-        let committee_frame = if committee_anchor > 0 {
-            committee_anchor
+        let (committee_frame, anchor_source) = if committee_anchor > 0 {
+            (committee_anchor, "global")
         } else {
-            self.clock_store
-                .get_latest_shard_clock_frame(&self.filter)
-                .ok()
-                .and_then(|f| f.header.as_ref().map(|h| h.frame_number))
-                .unwrap_or(0)
-                .saturating_add(1)
+            (
+                self.clock_store
+                    .get_latest_shard_clock_frame(&self.filter)
+                    .ok()
+                    .and_then(|f| f.header.as_ref().map(|h| h.frame_number))
+                    .unwrap_or(0)
+                    .saturating_add(1),
+                "shard_fallback",
+            )
         };
-        self.prover_registry
+        let members = self.prover_registry
             .get_active_provers(&self.filter, committee_frame)
             .map(|a| a.iter().map(|p| p.public_key.clone()).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (committee_frame, anchor_source, members)
     }
 
     /// Order-independent fingerprint of a committee member set.
@@ -2286,20 +2290,40 @@ impl AppConsensusEngine {
         // global) would seed the simplex `peers` set from the wrong epoch, out of
         // step with the leader schedule. Falls back to the shard anchor pre-fork
         // (global chain absent → both are epoch 0).
-        let member_pubkeys = self.compute_committee_members();
+        let (committee_frame, anchor_source, member_pubkeys) = self.compute_committee_members();
         // Record the committee fingerprint so the run loop can detect a
         // membership change and rebuild (dynamic committee).
         self.cw_committee_fp = Some(Self::committee_fp(&member_pubkeys));
         let my_sk = bls_signer.private_key().to_vec();
         let my_pk = bls_signer.public_key().to_vec();
-        let (scheme, peers) =
-            crate::cw_app_seams::build_app_committee(&member_pubkeys, &my_sk, &my_pk, &app_address)
-                .ok_or_else(|| {
-                    QuilError::Consensus(
-                        "app CW committee build failed (this node's key not in the active set?)"
-                            .into(),
-                    )
-                })?;
+        let local_key_present = member_pubkeys.iter().any(|key| key == &my_pk);
+        let (scheme, peers) = match crate::cw_app_seams::build_app_committee(
+            &member_pubkeys,
+            &my_sk,
+            &my_pk,
+            &app_address,
+        ) {
+            Ok(committee) => committee,
+            Err(reason) => {
+                // This is the regular-node diagnostic boundary: the membership
+                // snapshot below is exactly what simplex used, and contains no
+                // secret material or high-cardinality metric labels.
+                warn!(
+                    core_id = self.core_id,
+                    filter = %hex::encode(&self.filter),
+                    committee_frame,
+                    committee_epoch = quil_types::consensus::epoch_for_frame(committee_frame),
+                    anchor_source,
+                    members = member_pubkeys.len(),
+                    local_key_present,
+                    committee_build_reason = reason.as_str(),
+                    "app CW committee unavailable"
+                );
+                return Err(QuilError::Consensus(
+                    "app CW committee build failed (this node's key not in the active set?)".into(),
+                ));
+            }
+        };
 
         // Leader provider — identical construction to the legacy path.
         let leader_provider: Arc<
@@ -2866,6 +2890,7 @@ impl AppConsensusEngine {
             if let Some(h) = frame.header.as_ref() {
                 // Validate: address must match this shard
                 if h.address != self.app_address {
+                    crate::metrics::inc_app_shard_full_frame("wrong_filter");
                     return;
                 }
                 let frame_number = h.frame_number;
@@ -2879,6 +2904,7 @@ impl AppConsensusEngine {
                     Some(v) => match validate_app_frame_panic_safe(v, &frame, /* proposal */ false) {
                         Ok(true) => {}
                         Ok(false) => {
+                            crate::metrics::inc_app_shard_full_frame("validation_rejected");
                             warn!(
                                 core_id = self.core_id,
                                 frame = frame_number,
@@ -2887,6 +2913,7 @@ impl AppConsensusEngine {
                             return;
                         }
                         Err(e) => {
+                            crate::metrics::inc_app_shard_full_frame("validation_error");
                             warn!(
                                 core_id = self.core_id,
                                 frame = frame_number,
@@ -2897,6 +2924,7 @@ impl AppConsensusEngine {
                         }
                     },
                     None => {
+                        crate::metrics::inc_app_shard_full_frame("validator_not_ready");
                         debug!(
                             core_id = self.core_id,
                             frame = frame_number,
@@ -2905,6 +2933,8 @@ impl AppConsensusEngine {
                         return;
                     }
                 }
+
+                crate::metrics::inc_app_shard_full_frame("accepted");
 
                 // Cache in frame store (keyed by output hash) — kept for
                 // the existing output-hash lookup path.
@@ -2940,9 +2970,12 @@ impl AppConsensusEngine {
                     // frames). The buffer is materialized in strict order
                     // against the finalized (trusted) requests_root.
                     self.received_full_frames.insert(frame_number, frame);
+                    crate::metrics::inc_app_shard_full_frame("buffered");
                     self.try_materialize_follower_frames().await;
                 }
             }
+        } else {
+            crate::metrics::inc_app_shard_full_frame("decode_error");
         }
     }
 
@@ -3134,6 +3167,7 @@ impl AppConsensusEngine {
                 })
                 .collect();
             if canonical.len() != frame.requests.len() {
+                crate::metrics::inc_app_shard_full_frame("requests_decode_rejected");
                 warn!(core_id = self.core_id, frame = next,
                     "received frame has un-re-encodable requests; rejecting");
                 self.received_full_frames.remove(&next);
@@ -3148,6 +3182,7 @@ impl AppConsensusEngine {
                 }
             };
             if recomputed != trusted_root {
+                crate::metrics::inc_app_shard_full_frame("requests_root_rejected");
                 warn!(core_id = self.core_id, frame = next,
                     "received frame requests_root mismatch with finalized header — rejecting");
                 self.received_full_frames.remove(&next);
@@ -3181,6 +3216,7 @@ impl AppConsensusEngine {
                 .await
             {
                 Ok((processed, skipped)) => {
+                    crate::metrics::inc_app_shard_full_frame("materialized");
                     self.set_materialized_frame(next);
                     self.persist_materialized_cursor(next);
                     // Advance the clock head in lockstep with the cursor. This is
@@ -3211,6 +3247,7 @@ impl AppConsensusEngine {
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
                     if *attempts >= MAX_MATERIALIZE_RETRIES {
+                        crate::metrics::inc_app_shard_full_frame("materialize_failed_terminal");
                         warn!(core_id = self.core_id, frame = next, attempts = *attempts, error = %e,
                             "materialize of received shard frame failed repeatedly — dropping frame, requesting shard sync");
                         self.received_full_frames.remove(&next);
@@ -3220,6 +3257,7 @@ impl AppConsensusEngine {
                             missing_frames: vec![next],
                         });
                     } else {
+                        crate::metrics::inc_app_shard_full_frame("materialize_failed_retrying");
                         warn!(core_id = self.core_id, frame = next, attempts = *attempts, error = %e,
                             "materialize of received shard frame failed — will retry");
                     }
@@ -3241,6 +3279,7 @@ impl AppConsensusEngine {
             .filter(|&f| f > next_needed)
             .collect();
         if !self.received_full_frames.contains_key(&next_needed) && !ahead.is_empty() {
+            crate::metrics::inc_app_shard_full_frame("gap");
             warn!(
                 core_id = self.core_id,
                 missing_from = next_needed,

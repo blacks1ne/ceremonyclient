@@ -452,16 +452,16 @@ pub fn build_app_committee(
     my_signing_key: &[u8],
     my_public_key: &[u8],
     app_address: &[u8],
-) -> Option<(SimplexFalconScheme, Arc<[FalconPublicKey]>)> {
+) -> Result<(SimplexFalconScheme, Arc<[FalconPublicKey]>), quil_cw_consensus::committee::CommitteeBuildError> {
     let mut namespace = b"appshard".to_vec();
     namespace.extend_from_slice(app_address);
-    let committee = quil_cw_consensus::committee::build_global_committee(
+    let committee = quil_cw_consensus::committee::build_global_committee_diagnostic(
         member_pubkeys,
         my_signing_key,
         my_public_key,
         &namespace,
     )?;
-    Some((committee.scheme, committee.peers))
+    Ok((committee.scheme, committee.peers))
 }
 
 /// The engine's handle to a running simplex-backed app-shard consensus. On each
