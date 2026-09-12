@@ -1158,7 +1158,7 @@ mod tests {
     fn allocation(filter: Vec<u8>, epoch: u64) -> ShardAllocationInfo {
         ShardAllocationInfo {
             filter,
-            status: 1,
+            status: 2,
             epoch,
             ..Default::default()
         }
