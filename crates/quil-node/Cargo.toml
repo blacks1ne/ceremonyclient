@@ -14,6 +14,10 @@ name = "prover-join-test"
 path = "src/bin/prover_join_test.rs"
 
 [[bin]]
+name = "archive-vertex-probe"
+path = "src/bin/archive_vertex_probe.rs"
+
+[[bin]]
 name = "blossom-chat"
 path = "src/bin/blossom_chat.rs"
 

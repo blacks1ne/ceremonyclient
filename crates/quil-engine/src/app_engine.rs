@@ -1597,6 +1597,18 @@ impl quil_consensus::leader_provider::LeaderProvider<AppShardState> for AppLeade
                             );
                         }
                     } else {
+                        // Opt in to the extra store walk when investigating empty
+                        // storage attestations; normal proposal cost is unchanged.
+                        if std::env::var_os("QUIL_DIAG_STORAGE_INVENTORY").is_some() {
+                            match crate::app_shard_metadata::vote_opening_inventory(own_crdt, &replica_store, &self.filter, epoch) {
+                                Ok((covered_leaves, readable_replicas)) => warn!(
+                                    frame = frame_number, epoch, covered_leaves, readable_replicas,
+                                    "empty app storage attestation inventory"
+                                ),
+                                Err(error) => warn!(frame = frame_number, epoch, %error,
+                                    "empty app storage attestation inventory unavailable"),
+                            }
+                        }
                         warn!(
                             frame = frame_number,
                             "app-shard proof: build_vote_openings produced nothing (no readable replicas for this shard) — frame carries NO storage attestation (the global storage gate will withhold this shard's reward)"
@@ -4625,12 +4637,14 @@ impl AppConsensusEngine {
             if let Some(h) = frame.header.as_ref() {
                 // Validate: address must match this shard
                 if h.address != self.app_address {
+                    crate::metrics::inc_app_shard_full_frame("wrong_filter");
                     return;
                 }
                 let frame_number = h.frame_number;
 
                 if let Some(validator) = self.app_frame_validator.as_ref() {
                     if let Err(error) = validator.prepare_storage_history(&frame).await {
+                        crate::metrics::inc_app_shard_full_frame("storage_history_unavailable");
                         debug!(core_id = self.core_id, frame = frame_number, %error,
                             "follower frame historical registration unavailable");
                         return;
@@ -4651,6 +4665,7 @@ impl AppConsensusEngine {
                     Some(v) => match validate_app_frame_panic_safe(v, &frame, /* proposal */ !certified) {
                         Ok(true) => {}
                         Ok(false) => {
+                            crate::metrics::inc_app_shard_full_frame("validation_rejected");
                             warn!(
                                 core_id = self.core_id,
                                 frame = frame_number,
@@ -4659,6 +4674,7 @@ impl AppConsensusEngine {
                             return;
                         }
                         Err(e) => {
+                            crate::metrics::inc_app_shard_full_frame("validation_error");
                             warn!(
                                 core_id = self.core_id,
                                 frame = frame_number,
@@ -4669,6 +4685,7 @@ impl AppConsensusEngine {
                         }
                     },
                     None => {
+                        crate::metrics::inc_app_shard_full_frame("validator_not_ready");
                         debug!(
                             core_id = self.core_id,
                             frame = frame_number,
@@ -4677,6 +4694,8 @@ impl AppConsensusEngine {
                         return;
                     }
                 }
+
+                crate::metrics::inc_app_shard_full_frame("accepted");
 
                 // Cache in frame store (keyed by output hash) — kept for
                 // the existing output-hash lookup path.
@@ -4699,6 +4718,7 @@ impl AppConsensusEngine {
                     .map(|df| frame_number >= df && frame_number < df + 8)
                     .unwrap_or(false);
                 if fault_drop {
+                    crate::metrics::inc_app_shard_full_frame("fault_dropped");
                     tracing::warn!(
                         core_id = self.core_id,
                         frame = frame_number,
@@ -4712,6 +4732,7 @@ impl AppConsensusEngine {
                     // frames). The buffer is materialized in strict order
                     // against the finalized (trusted) requests_root.
                     self.received_full_frames.insert(frame_number, frame);
+                    crate::metrics::inc_app_shard_full_frame("buffered");
                     if !certified {
                         if let Ok(child) = self.clock_store.get_shard_clock_frame(&self.filter, frame_number + 1, false) {
                             if let Some(child) = child.header {
@@ -4721,7 +4742,11 @@ impl AppConsensusEngine {
                     }
                     self.try_materialize_follower_frames().await;
                 }
+            } else {
+                crate::metrics::inc_app_shard_full_frame("missing_header");
             }
+        } else {
+            crate::metrics::inc_app_shard_full_frame("decode_error");
         }
     }
 
@@ -4971,6 +4996,7 @@ impl AppConsensusEngine {
                 })
                 .collect();
             if canonical.len() != frame.requests.len() {
+                crate::metrics::inc_app_shard_full_frame("requests_decode_rejected");
                 warn!(core_id = self.core_id, frame = next,
                     "received frame has un-re-encodable requests; rejecting");
                 self.received_full_frames.remove(&next);
@@ -4985,6 +5011,7 @@ impl AppConsensusEngine {
                 }
             };
             if recomputed != trusted_root {
+                crate::metrics::inc_app_shard_full_frame("requests_root_rejected");
                 warn!(core_id = self.core_id, frame = next,
                     "received frame requests_root mismatch with finalized header — rejecting");
                 self.received_full_frames.remove(&next);
@@ -5010,6 +5037,7 @@ impl AppConsensusEngine {
                 .await
             {
                 Ok((processed, skipped)) => {
+                    crate::metrics::inc_app_shard_full_frame("materialized");
                     self.set_materialized_frame(next);
                     self.extend_audited_history(next);
                     // Advance the clock head in lockstep with the cursor. This is
@@ -5029,6 +5057,7 @@ impl AppConsensusEngine {
                         "materialized received shard frame (follower)");
                 }
                 Err(e) if quil_execution::token_intrinsic::is_proof_worker_busy(&e) => {
+                    crate::metrics::inc_app_shard_full_frame("proof_worker_busy");
                     // Local contention for the proof worker: the frame is
                     // fine and a shard sync would not relieve it. Keep the
                     // frame and retry without counting toward the drop;
@@ -5055,6 +5084,7 @@ impl AppConsensusEngine {
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
                     if *attempts >= MAX_MATERIALIZE_RETRIES {
+                        crate::metrics::inc_app_shard_full_frame("materialize_failed_terminal");
                         warn!(core_id = self.core_id, frame = next, attempts = *attempts, error = %e,
                             "materialize of received shard frame failed repeatedly — dropping frame, requesting shard sync");
                         self.received_full_frames.remove(&next);
@@ -5064,6 +5094,7 @@ impl AppConsensusEngine {
                             missing_frames: vec![next],
                         });
                     } else {
+                        crate::metrics::inc_app_shard_full_frame("materialize_failed_retrying");
                         warn!(core_id = self.core_id, frame = next, attempts = *attempts, error = %e,
                             "materialize of received shard frame failed — will retry");
                     }
@@ -5085,6 +5116,7 @@ impl AppConsensusEngine {
             .filter(|&f| f > next_needed)
             .collect();
         if !self.received_full_frames.contains_key(&next_needed) && !ahead.is_empty() {
+            crate::metrics::inc_app_shard_full_frame("gap");
             warn!(
                 core_id = self.core_id,
                 missing_from = next_needed,

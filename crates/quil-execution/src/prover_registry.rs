@@ -393,6 +393,12 @@ impl InMemoryProverRegistry {
                 continue;
             };
             budget.allocation(&prover_ref, &alloc)?;
+            if !self.prover_cache.contains_key(&prover_ref) && !retired_keys.contains_key(&prover_ref) {
+                tracing::warn!(
+                    allocation_status = ?alloc.status,
+                    "registry allocation parent has no usable key in this decode batch"
+                );
+            }
             self.attach_allocation(&prover_ref, alloc, retired_keys.get(&prover_ref));
         }
         Ok(())

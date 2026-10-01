@@ -109,6 +109,26 @@ pub(crate) async fn recover_shard_from_latest(
     local: Option<AppShardFrame>,
     target: &dyn ShardRecoveryTarget,
 ) -> Result<ShardRecoveryProgress> {
+    crate::metrics::inc_app_shard_sync("attempted");
+    let result = recover_shard_from_latest_inner(syncer, filter, local, target).await;
+    let outcome = match &result {
+        Ok(ShardRecoveryProgress::Replayed { materialized, archive_tip }) if materialized >= archive_tip => "replay_caught_up",
+        Ok(ShardRecoveryProgress::Replayed { .. }) => "replay_partial",
+        Ok(ShardRecoveryProgress::Anchored { .. }) => "anchored",
+        Ok(ShardRecoveryProgress::Inherited) => "inherited",
+        Ok(ShardRecoveryProgress::NotReady) => "not_ready",
+        Err(_) => "failed",
+    };
+    crate::metrics::inc_app_shard_sync(outcome);
+    result
+}
+
+async fn recover_shard_from_latest_inner(
+    syncer: &dyn ProverTreeSyncer,
+    filter: &[u8],
+    local: Option<AppShardFrame>,
+    target: &dyn ShardRecoveryTarget,
+) -> Result<ShardRecoveryProgress> {
     if let Some(local) = local {
         let (materialized, archive_tip) = replay_shard_from_latest(
             syncer, filter, local, target.materialized(), |frame, child| target.replay(frame, child),
