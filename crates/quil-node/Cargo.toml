@@ -21,6 +21,10 @@ path = "src/bin/archive_vertex_probe.rs"
 name = "blossom-chat"
 path = "src/bin/blossom_chat.rs"
 
+[[bin]]
+name = "archive-certificate-probe"
+path = "src/bin/archive_certificate_probe.rs"
+
 [features]
 # The replacement (QCT3) token suite is the default node path. Disabling the
 # feature builds a node that rejects every confidential token operation.
