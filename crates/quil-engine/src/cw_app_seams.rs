@@ -1164,6 +1164,41 @@ pub fn build_session_committee(
     build_committee_in_namespace(&session.members, my_signing_key, my_public_key, &session.namespace().ok()?)
 }
 
+/// Build a legacy committee while retaining a bounded rejection category.
+pub fn build_app_committee_diagnostic(
+    member_pubkeys: &[Vec<u8>],
+    my_signing_key: &[u8],
+    my_public_key: &[u8],
+    app_address: &[u8],
+) -> Result<(SimplexFalconScheme, Arc<[FalconPublicKey]>), quil_cw_consensus::committee::CommitteeBuildError> {
+    let mut namespace = b"appshard".to_vec();
+    namespace.extend_from_slice(app_address);
+    build_committee_in_namespace_diagnostic(member_pubkeys, my_signing_key, my_public_key, &namespace)
+}
+
+/// Preserve the authorized session's members and domain in diagnostic builds.
+pub fn build_session_committee_diagnostic(
+    session: &Session,
+    my_signing_key: &[u8],
+    my_public_key: &[u8],
+) -> Result<(SimplexFalconScheme, Arc<[FalconPublicKey]>), quil_cw_consensus::committee::CommitteeBuildError> {
+    let namespace = session.namespace()
+        .map_err(|_| quil_cw_consensus::committee::CommitteeBuildError::InvalidSessionNamespace)?;
+    build_committee_in_namespace_diagnostic(&session.members, my_signing_key, my_public_key, &namespace)
+}
+
+fn build_committee_in_namespace_diagnostic(
+    member_pubkeys: &[Vec<u8>],
+    my_signing_key: &[u8],
+    my_public_key: &[u8],
+    namespace: &[u8],
+) -> Result<(SimplexFalconScheme, Arc<[FalconPublicKey]>), quil_cw_consensus::committee::CommitteeBuildError> {
+    let committee = quil_cw_consensus::committee::build_global_committee_diagnostic(
+        member_pubkeys, my_signing_key, my_public_key, namespace,
+    )?;
+    Ok((committee.scheme, committee.peers))
+}
+
 fn build_committee_in_namespace(
     member_pubkeys: &[Vec<u8>],
     my_signing_key: &[u8],
@@ -2134,6 +2169,40 @@ mod tests {
         let mut wrong_shard = frame;
         wrong_shard.header.as_mut().unwrap().address = vec![2; 32];
         assert!(proposer.recover_head(&store, &wrong_shard).is_err());
+    }
+
+    #[test]
+    fn diagnostic_session_committee_preserves_authorization() {
+        use quil_cw_consensus::committee::CommitteeBuildError;
+        let me = quil_crypto::FalconSigner::generate();
+        let outsider = quil_crypto::FalconSigner::generate();
+        let mut session = Session {
+            chain_id: [1; 32], filter: vec![2; 32], generation: 0,
+            genesis: [3; 32], base_frame: 4, authorization: [5; 32],
+            members: vec![me.public_key().to_vec()],
+        };
+        for generation in [0, 1] {
+            session.generation = generation;
+            let (ordinary, ordinary_peers) = build_session_committee(&session, me.private_key(), me.public_key()).unwrap();
+            let (diagnostic, diagnostic_peers) = build_session_committee_diagnostic(&session, me.private_key(), me.public_key()).unwrap();
+            assert_eq!(ordinary_peers, diagnostic_peers);
+            use quil_cw_consensus::_consensus::{types::{Epoch, Round, View}, simplex::{types::{Proposal, Subject}, scheme::Namespace}};
+            use quil_cw_consensus::_crypto::{sha256::Digest, certificate::Scheme as _};
+            let proposal = Proposal::new(Round::new(Epoch::new(generation), View::new(1)), View::new(0), Digest([7; 32]));
+            let vote = diagnostic.sign(Subject::Finalize { proposal: &proposal }).unwrap();
+            let assembler = quil_cw_consensus::falcon_scheme::Generic::<Namespace>::verifier(
+                &session.namespace().unwrap(), ordinary_peers.to_vec().try_into().unwrap(),
+            );
+            let certificate = assembler.assemble::<SimplexFalconScheme, _, quil_cw_consensus::_utils::N3f1>([vote]).unwrap();
+            assert!(ordinary.verify_finalization_cert(&proposal, &certificate));
+            let (legacy, _) = build_app_committee(&session.members, me.private_key(), me.public_key(), &session.filter).unwrap();
+            assert_eq!(legacy.verify_finalization_cert(&proposal, &certificate), generation == 0);
+            assert_eq!(build_session_committee_diagnostic(&session, outsider.private_key(), outsider.public_key()).err(), Some(CommitteeBuildError::SignerRejected));
+            assert!(build_session_committee(&session, outsider.private_key(), outsider.public_key()).is_none());
+        }
+        session.filter.clear();
+        assert_eq!(build_session_committee_diagnostic(&session, me.private_key(), me.public_key()).err(), Some(CommitteeBuildError::InvalidSessionNamespace));
+        assert!(build_session_committee(&session, me.private_key(), me.public_key()).is_none());
     }
 
     #[test]
