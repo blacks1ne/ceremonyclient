@@ -323,6 +323,10 @@ pub async fn sync_shard_phases_verified(
         let PhaseSource::Tree { version: source_version, root: remote_root, global_frame } = source else {
             continue;
         };
+        if std::env::var_os("QUIL_DIAG_ARCHIVE_PROVENANCE").is_some() {
+            tracing::info!(phase, source_version, resolved_global_frame = global_frame,
+                anchored = !exp.is_empty(), "archive phase source resolved");
+        }
         if phase == 0 { pinned_frame = global_frame; }
         let got =
             sync_one_phase(&mut client, &handle, &crdt, shard_id, phase, source_version, Some(remote_root))
@@ -331,6 +335,8 @@ pub async fn sync_shard_phases_verified(
             if got.as_slice() != exp {
                 warn!(
                     phase,
+                    source_version,
+                    resolved_global_frame = global_frame,
                     got = %hex::encode(got),
                     expected = %hex::encode(exp),
                     "phase root != anchor after root-addressed pull — not committing",

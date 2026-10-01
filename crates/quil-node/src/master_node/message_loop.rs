@@ -1373,20 +1373,26 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                 for handle in &submitted {
                                     handle.send(quil_engine::app_engine::AppEngineMessage::Prover(received.data.clone()));
                                 }
+                                if !submitted.is_empty() {
+                                    quil_engine::metrics::inc_app_shard_router_message("prover");
+                                }
                                 let mut routed = !submitted.is_empty();
                                 for (filter, handle) in entries.iter().filter(|_| submitted.is_empty()) {
                                     if bm == quil_engine::bitmasks::shard_consensus_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Consensus(received.data.clone()));
+                                        quil_engine::metrics::inc_app_shard_router_message("consensus");
                                         routed = true;
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_frame_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Frame(received.data.clone()));
+                                        quil_engine::metrics::inc_app_shard_router_message("frame");
                                         routed = true;
                                         break;
                                     }
                                     if bm == quil_engine::bitmasks::shard_dispatch_bitmask(filter).as_slice() {
                                         handle.send(quil_engine::app_engine::AppEngineMessage::Dispatch(received.data.clone()));
+                                        quil_engine::metrics::inc_app_shard_router_message("dispatch");
                                         routed = true;
                                         break;
                                     }
@@ -1413,6 +1419,7 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                                             tracing::debug!(filter = %hex::encode(filter), channel,
                                                 sender_known = !from_key.is_empty(), bytes = cw_bytes.len(),
                                                 "routing shard CW message to its engine");
+                                            quil_engine::metrics::inc_app_shard_router_message("cw");
                                             handle.send(quil_engine::app_engine::AppEngineMessage::CwIn {
                                                 channel,
                                                 from: from_key,

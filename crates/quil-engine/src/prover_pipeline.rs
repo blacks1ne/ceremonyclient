@@ -167,6 +167,7 @@ impl ProverPipeline {
         tracing::info!(frame = frame_number, filters = filters.len(), needs_storage, prune_replicas,
             "dispatching prover confirmation");
         let me = self.clone();
+        let filter_count = filters.len();
         tokio::spawn(async move {
             // Limit expensive preparation independently from network timeouts.
             // Keep the reservation inside the blocking task: cancelling its
@@ -201,6 +202,8 @@ impl ProverPipeline {
             ).await {
                 Ok(Ok(())) => {
                     attempt.published(me.current_frame.as_ref().map(|f| f.effective()).unwrap_or(frame_number));
+                    info!(frame = frame_number, filters = filter_count, needs_storage, prune_replicas,
+                        "prover confirmation published; awaiting on-chain registration");
                     if prune_replicas {
                         if let Some(store) = me.replica_store.as_ref() {
                             // Keep current and next epoch replicas. Publication

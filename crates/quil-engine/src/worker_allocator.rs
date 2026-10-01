@@ -815,6 +815,11 @@ impl WorkerAllocator {
                     warn!(
                         core_id = worker.core_id,
                         stale_filter = hex::encode(&worker.filter),
+                        stale_allocation_present = alloc_by_filter.contains_key(&worker.filter),
+                        stale_effective_status = ?alloc_by_filter.get(&worker.filter).map(|a| a.effective_status(frame_number)),
+                        pending_filter_frame = worker.pending_filter_frame,
+                        unbound_active_count = prover_info.as_ref().map(|p| p.allocations.iter()
+                            .filter(|a| a.status == ProverStatus::Active && !bound_filters.contains(&a.confirmation_filter)).count()).unwrap_or(0),
                         "worker pinned to a filter with no active allocation while an \
                          active child allocation is unbound (likely split-parent) — \
                          deallocating so the child rebinds"
