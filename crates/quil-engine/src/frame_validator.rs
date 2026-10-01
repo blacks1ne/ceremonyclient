@@ -952,11 +952,25 @@ impl BlsAppFrameValidator {
                 let committee_pubkeys: Vec<Vec<u8>> = active.iter().map(|p| p.public_key.clone()).collect();
                 let mut namespace = b"appshard".to_vec();
                 namespace.extend_from_slice(&header.address);
-                let verified = quil_cw_consensus::app_cert::verify_finalization_details(
+                let verified = quil_cw_consensus::app_cert::check_finalization(
                     cert_bytes, &committee_pubkeys, &namespace, output_digest,
-                ).ok_or_else(|| QuilError::InvalidSignature(
-                    "app shard frame CW finalization cert verification failed".into(),
-                ))?;
+                ).map_err(|reason| {
+                    // Bounded reason and counts only: preserve rejection while
+                    // distinguishing reconstruction, encoding and quorum faults.
+                    let signers = quil_cw_consensus::app_cert::unverified_signers(cert_bytes);
+                    tracing::warn!(
+                        reason = %reason,
+                        frame = header.frame_number,
+                        global_frame = committee_frame,
+                        committee_members = committee_pubkeys.len(),
+                        claimed_members = signers.map(|s| s.0),
+                        claimed_signers = signers.map(|s| s.1),
+                        "app archive certificate rejected (signer counts are unauthenticated)",
+                    );
+                    QuilError::InvalidSignature(
+                        "app shard frame CW finalization cert verification failed".into(),
+                    )
+                })?;
                 if verified.finalization.proposal.round.view().get() != header.rank {
                     return Err(QuilError::InvalidSignature(
                         "app header rank differs from certified view".into(),
