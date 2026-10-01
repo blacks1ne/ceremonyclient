@@ -3795,16 +3795,22 @@ impl AppConsensusEngine {
         self.cw_committee_fp = Some(Self::committee_fp(&member_pubkeys));
         let my_sk = bls_signer.private_key().to_vec();
         let my_pk = bls_signer.public_key().to_vec();
-        let (scheme, peers) = match session.as_ref() {
-            Some(session) => crate::cw_app_seams::build_session_committee(session, &my_sk, &my_pk),
-            None => crate::cw_app_seams::build_app_committee(&member_pubkeys, &my_sk, &my_pk, &app_address),
-        }
-                .ok_or_else(|| {
-                    QuilError::Consensus(
-                        "app CW committee build failed (this node's key not in the active set?)"
-                            .into(),
-                    )
-                })?;
+        let committee = match session.as_ref() {
+            Some(session) => crate::cw_app_seams::build_session_committee_diagnostic(session, &my_sk, &my_pk),
+            None => crate::cw_app_seams::build_app_committee_diagnostic(&member_pubkeys, &my_sk, &my_pk, &app_address),
+        };
+        let (scheme, peers) = committee.map_err(|reason| {
+            warn!(
+                core_id = self.core_id,
+                committee_source = if session.is_some() { "authorized_session" } else { "legacy_registry" },
+                session_generation = session.as_ref().map(|s| s.generation),
+                members = member_pubkeys.len(),
+                local_key_present = member_pubkeys.iter().any(|key| key == &my_pk),
+                committee_build_reason = reason.as_str(),
+                "app CW committee unavailable"
+            );
+            QuilError::Consensus("app CW committee build failed (this node's key not in the active set?)".into())
+        })?;
 
         if let (Some(session), Some(manager)) = (session.as_ref(), self.execution_engine.clone()) {
             let validator = self.frame_validator();

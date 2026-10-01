@@ -19,6 +19,30 @@ pub struct GlobalCommittee {
     pub scheme: SimplexFalconScheme,
 }
 
+/// The stage at which commonware committee construction was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitteeBuildError {
+    Empty,
+    MalformedMemberKey,
+    DuplicateMemberKey,
+    InvalidLocalPublicKey,
+    SignerRejected,
+    InvalidSessionNamespace,
+}
+
+impl CommitteeBuildError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::MalformedMemberKey => "malformed_member_key",
+            Self::DuplicateMemberKey => "duplicate_member_key",
+            Self::InvalidLocalPublicKey => "invalid_local_public_key",
+            Self::SignerRejected => "signer_rejected",
+            Self::InvalidSessionNamespace => "invalid_session_namespace",
+        }
+    }
+}
+
 /// Build the committee from raw Falcon material.
 ///
 /// - `committee_pubkeys`: every member's 897-byte `q-consensus-key` public key
@@ -34,20 +58,36 @@ pub fn build_global_committee(
     my_public_key: &[u8],
     namespace: &[u8],
 ) -> Option<GlobalCommittee> {
+    build_global_committee_diagnostic(committee_pubkeys, my_signing_key, my_public_key, namespace)
+        .ok()
+}
+
+/// As [`build_global_committee`], retaining the rejection reason for operators.
+pub fn build_global_committee_diagnostic(
+    committee_pubkeys: &[Vec<u8>],
+    my_signing_key: &[u8],
+    my_public_key: &[u8],
+    namespace: &[u8],
+) -> Result<GlobalCommittee, CommitteeBuildError> {
     let pks: Vec<FalconPublicKey> = committee_pubkeys
         .iter()
-        .map(|b| FalconPublicKey::from_bytes(b))
-        .collect::<Option<_>>()?;
+        .map(|b| FalconPublicKey::from_bytes(b).ok_or(CommitteeBuildError::MalformedMemberKey))
+        .collect::<Result<_, _>>()?;
     if pks.is_empty() {
-        return None;
+        return Err(CommitteeBuildError::Empty);
     }
-    let set: Set<FalconPublicKey> = pks.clone().try_into().ok()?;
+    let set: Set<FalconPublicKey> = pks
+        .clone()
+        .try_into()
+        .map_err(|_| CommitteeBuildError::DuplicateMemberKey)?;
 
-    let private_key = FalconPrivateKey::from_bytes(my_signing_key, my_public_key)?;
+    let private_key = FalconPrivateKey::from_bytes(my_signing_key, my_public_key)
+        .ok_or(CommitteeBuildError::InvalidLocalPublicKey)?;
     // `signer` returns None if our key isn't in the participant set.
-    let scheme = SimplexFalconScheme::signer(namespace, set, private_key)?;
+    let scheme = SimplexFalconScheme::signer(namespace, set, private_key)
+        .ok_or(CommitteeBuildError::SignerRejected)?;
 
-    Some(GlobalCommittee {
+    Ok(GlobalCommittee {
         peers: Arc::from(pks),
         scheme,
     })
@@ -59,15 +99,72 @@ mod tests {
     use quil_types::crypto::Signer as _;
 
     #[test]
+    fn diagnostic_reasons_preserve_committee_acceptance() {
+        let me = quil_crypto::FalconSigner::generate();
+        let outsider = quil_crypto::FalconSigner::generate();
+        let key = me.public_key().to_vec();
+        let cases = [
+            (
+                Vec::new(),
+                me.private_key(),
+                me.public_key(),
+                CommitteeBuildError::Empty,
+            ),
+            (
+                vec![vec![0; 10]],
+                me.private_key(),
+                me.public_key(),
+                CommitteeBuildError::MalformedMemberKey,
+            ),
+            (
+                vec![key.clone(), key.clone()],
+                me.private_key(),
+                me.public_key(),
+                CommitteeBuildError::DuplicateMemberKey,
+            ),
+            (
+                vec![key.clone()],
+                me.private_key(),
+                &[0u8; 10][..],
+                CommitteeBuildError::InvalidLocalPublicKey,
+            ),
+            (
+                vec![key.clone()],
+                outsider.private_key(),
+                outsider.public_key(),
+                CommitteeBuildError::SignerRejected,
+            ),
+        ];
+        for (members, sk, pk, expected) in cases {
+            assert_eq!(
+                build_global_committee_diagnostic(&members, sk, pk, b"global").err(),
+                Some(expected)
+            );
+            assert!(build_global_committee(&members, sk, pk, b"global").is_none());
+        }
+        let members = vec![key];
+        let diagnostic = build_global_committee_diagnostic(
+            &members,
+            me.private_key(),
+            me.public_key(),
+            b"global",
+        )
+        .unwrap();
+        let ordinary =
+            build_global_committee(&members, me.private_key(), me.public_key(), b"global").unwrap();
+        assert_eq!(diagnostic.peers, ordinary.peers);
+    }
+
+    #[test]
     fn builds_committee_and_scheme() {
         // We are one of 4 members.
         let me = quil_crypto::FalconSigner::generate();
         let my_signing = me.private_key().to_vec();
         let my_public = me.public_key().to_vec();
-        let others: Vec<quil_crypto::FalconSigner> =
-            (0..3).map(|_| quil_crypto::FalconSigner::generate()).collect();
-        let mut committee: Vec<Vec<u8>> =
-            others.iter().map(|s| s.public_key().to_vec()).collect();
+        let others: Vec<quil_crypto::FalconSigner> = (0..3)
+            .map(|_| quil_crypto::FalconSigner::generate())
+            .collect();
+        let mut committee: Vec<Vec<u8>> = others.iter().map(|s| s.public_key().to_vec()).collect();
         committee.push(my_public.clone());
 
         let c = build_global_committee(&committee, &my_signing, &my_public, b"global")
