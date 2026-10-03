@@ -1062,6 +1062,45 @@ pub fn decide_leaves(
     (reject, confirm)
 }
 
+/// Decide each held leave against destinations that can actually take its
+/// worker. Another holding (including a higher-reward one) is not a replacement.
+/// Keep unknown holdings until reward inputs arrive; explicit cleanup is the
+/// lifecycle caller's responsibility. The existing decision threshold and
+/// coverage floor are preserved; scores are computed once per snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_leaves_against_replacements(
+    held: &[ShardDescriptor],
+    available: &[ShardDescriptor],
+    pending: &[Vec<u8>],
+    difficulty: u64,
+    world_bytes: &BigInt,
+    units: u64,
+    strategy: Strategy,
+) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let basis = pomw_basis(difficulty, world_bytes.try_into().unwrap_or(1), units);
+    let best = score_shards(available, &basis, world_bytes, strategy)
+        .into_iter().map(|s| s.score).max();
+    let threshold = best.map(|score|
+        score * BigInt::from(SCORE_DECIDE_THRESHOLD_PERCENT) / BigInt::from(100));
+    let held_scores: HashMap<&[u8], (&ShardDescriptor, BigInt)> =
+        score_shards(held, &basis, world_bytes, strategy).into_iter()
+            .map(|s| (held[s.idx].filter.as_slice(), (&held[s.idx], s.score))).collect();
+    let mut reject = Vec::new();
+    let mut confirm = Vec::new();
+    for filter in pending.iter().filter(|f| !f.is_empty()).take(100) {
+        let keep = match held_scores.get(filter.as_slice()) {
+            None => true,
+            Some((holding, score)) => {
+                (strategy == Strategy::RewardGreedy && holding.shards == 0)
+                    || (holding.size > 0 && holding.active_count <= HALT_RISK_PROVER_COUNT + 1)
+                    || threshold.as_ref().map_or(true, |t| score >= t)
+            }
+        };
+        if keep { reject.push(filter.clone()); } else { confirm.push(filter.clone()); }
+    }
+    (reject, confirm)
+}
+
 /// Default issuance units constant (matches Go's 8_000_000_000).
 pub const DEFAULT_UNITS: u64 = 8_000_000_000;
 
