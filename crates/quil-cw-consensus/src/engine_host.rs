@@ -251,6 +251,11 @@ where
     let (s1, r1) = (ch1.sender, ch1.receiver);
     let (s2, r2) = (ch2.sender, ch2.receiver);
 
+    let instance = crate::retention_diagnostics::next_instance();
+    let epoch = params.epoch;
+    let floor = params.finalized_floor.as_ref().map_or(0, |f| f.proposal.round.view().get());
+    let finalizer = Arc::new(crate::retention_diagnostics::ObservedFinalizer::new(finalizer, floor));
+    let observations = finalizer.clone();
     let thread = std::thread::spawn(move || {
         let cfg = match storage_directory {
             Some(dir) => {
@@ -285,6 +290,8 @@ where
             // host is dead (`thread.is_finished()`) and rebuild it.
             let mut handle = engine.start((s0, r0), (s1, r1), (s2, r2));
             let mut stopped = None;
+            let mut retention_tick = tokio::time::interval(Duration::from_secs(60));
+            retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 // Poll the flag (cw_tokio is tokio-backed, so tokio::time works
                 // in this runtime); on set, fall through and drop the engine
@@ -294,6 +301,16 @@ where
                     break;
                 }
                 tokio::select! {
+                    _ = retention_tick.tick() => {
+                        let snapshot = crate::retention_diagnostics::view_snapshot(&context.encode());
+                        let finalized = observations.finalized.load(std::sync::atomic::Ordering::Relaxed);
+                        let notarized = observations.notarized.load(std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(instance, epoch,
+                            current_view = ?snapshot.current, tracked_views = ?snapshot.tracked,
+                            observed_finalized_view = finalized, observed_notarized_view = notarized,
+                            views_since_observed_finalization = ?snapshot.current.map(|v| v.saturating_sub(finalized)),
+                            "consensus retention snapshot");
+                    }
                     outcome = &mut handle => {
                         stopped = Some(outcome);
                         break;
