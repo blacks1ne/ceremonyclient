@@ -53,6 +53,7 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, PeerId};
 
 use crate::protocol::pb;
+use crate::cw_traffic_diagnostics::{self, CwTrafficDiagnostics, TrafficMessage};
 
 /// The concrete stock gossipsub behaviour we wrap.
 type Inner = gossipsub::Behaviour;
@@ -106,6 +107,8 @@ pub enum BlossomSubEvent {
 
 /// BlossomSub-compatible `NetworkBehaviour`, backed by stock gossipsub.
 pub struct BlossomSubBehaviour {
+    /// Optional bounded counters; never consulted by delivery or validation.
+    cw_traffic: Option<CwTrafficDiagnostics>,
     /// The stock gossipsub behaviour that does the real work.
     inner: Inner,
     /// The gossipsub config, kept so `set_signing_identity` can rebuild `inner`
@@ -162,7 +165,15 @@ impl BlossomSubBehaviour {
             config.clone(),
         )
         .expect("valid gossipsub config");
+        let metrics_registry: crate::metrics::SharedRegistry = Arc::new(std::sync::Mutex::new(
+            prometheus_client::registry::Registry::default(),
+        ));
+        let cw_traffic = {
+            let mut registry = metrics_registry.lock().unwrap();
+            CwTrafficDiagnostics::from_env(&mut registry)
+        };
         Self {
+            cw_traffic,
             inner,
             config,
             params,
@@ -177,9 +188,7 @@ impl BlossomSubBehaviour {
             last_need_peers_check: std::time::Instant::now(),
             metrics_registered: false,
             warned_forward_filter: false,
-            metrics_registry: Arc::new(std::sync::Mutex::new(
-                prometheus_client::registry::Registry::default(),
-            )),
+            metrics_registry,
         }
     }
 
@@ -304,10 +313,30 @@ impl BlossomSubBehaviour {
     /// Publish `data` to `bitmask`. `Ok(())` on success or dedup; `Err` when not
     /// subscribed or on a publish error — matching the historical contract.
     pub fn publish(&mut self, bitmask: Vec<u8>, data: Vec<u8>) -> Result<(), String> {
+        let diagnostic_channel = if let Some(diagnostics) = self.cw_traffic.as_mut() {
+            diagnostics.observe("publish_attempt", &TrafficMessage {
+                source: self.local_peer_id.as_ref(), topic: &bitmask, data: &data,
+            }, data.len());
+            cw_traffic_diagnostics::channel(&bitmask, &data)
+        } else { None };
         if !self.subscriptions.contains(&bitmask) {
+            if let (Some(diagnostics), Some(channel)) = (self.cw_traffic.as_mut(), diagnostic_channel) {
+                diagnostics.outcome("publish_result", channel, "not_subscribed");
+            }
             return Err(format!("not subscribed to bitmask {}", hex::encode(&bitmask)));
         }
-        match self.inner.publish(topic_for(&bitmask).hash(), data) {
+        let result = self.inner.publish(topic_for(&bitmask).hash(), data);
+        if let (Some(diagnostics), Some(channel)) = (self.cw_traffic.as_mut(), diagnostic_channel) {
+            let outcome = match &result {
+                Ok(_) => "published",
+                Err(gossipsub::PublishError::Duplicate) => "duplicate",
+                Err(gossipsub::PublishError::NoPeersSubscribedToTopic) => "no_peers",
+                Err(gossipsub::PublishError::AllQueuesFull(_)) => "queues_full",
+                Err(_) => "error",
+            };
+            diagnostics.outcome("publish_result", channel, outcome);
+        }
+        match result {
             Ok(_) => Ok(()),
             // Already-seen message: historically a successful no-op.
             Err(gossipsub::PublishError::Duplicate) => Ok(()),
@@ -567,12 +596,27 @@ impl NetworkBehaviour for BlossomSubBehaviour {
                         message,
                     } => {
                         let bitmask = bitmask_from_topic(&message.topic);
+                        if let Some(diagnostics) = self.cw_traffic.as_mut() {
+                            diagnostics.observe("receive_unique", &TrafficMessage {
+                                source: message.source.as_ref(), topic: &bitmask, data: &message.data,
+                            }, message.data.len());
+                        }
                         // `validate_messages()` is on, so we must report an
                         // outcome for every message before it is forwarded.
                         let outcome = match self.validators.get(&bitmask) {
                             Some(v) => v(&propagation_source, &message.data),
                             None => ValidationResult::Accept,
                         };
+                        if let Some(diagnostics) = self.cw_traffic.as_mut() {
+                            if let Some(channel) = cw_traffic_diagnostics::channel(&bitmask, &message.data) {
+                                let outcome = match outcome {
+                                    ValidationResult::Accept => "accepted",
+                                    ValidationResult::Reject => "rejected",
+                                    ValidationResult::Ignore => "ignored",
+                                };
+                                diagnostics.outcome("receive_validation", channel, outcome);
+                            }
+                        }
                         let _ = self.inner.report_message_validation_result(
                             &message_id,
                             &propagation_source,
@@ -791,6 +835,97 @@ mod propagation_tests {
 
         assert_eq!(behaviour.subscribed_peer_count(&topic), 1);
         assert_eq!(behaviour.subscribed_peer_count(&[0x0c, 0xa2]), 0);
+    }
+
+    #[tokio::test]
+    async fn cw_diagnostics_preserve_nonce_rebroadcast_and_duplicate_suppression() {
+        async fn exchange(enabled: bool) -> Vec<Vec<u8>> {
+            let mut hub = build_swarm();
+            let mut leaf = build_swarm();
+            for swarm in [&mut hub, &mut leaf] {
+                let behaviour = swarm.behaviour_mut();
+                behaviour.cw_traffic = if enabled {
+                    let registry = behaviour.metrics_registry.clone();
+                    let mut registry = registry.lock().unwrap();
+                    Some(CwTrafficDiagnostics::for_test(&mut registry))
+                } else {
+                    None
+                };
+            }
+            let mut topic = vec![0; 33];
+            topic[0] = 1;
+            topic[32] = 7;
+            hub.behaviour_mut().subscribe(topic.clone());
+            leaf.behaviour_mut().subscribe(topic.clone());
+            hub.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+            let address = loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = hub.select_next_some().await {
+                    break address;
+                }
+            };
+            leaf.dial(address).unwrap();
+            let peer = *leaf.local_peer_id();
+            let payload = |nonce: u64| {
+                let mut data = vec![0x80];
+                data.extend_from_slice(&nonce.to_be_bytes());
+                data.extend_from_slice(b"same vote body");
+                data
+            };
+            let expected = vec![payload(1), payload(2)];
+            let mut received = Vec::new();
+            let mut published = false;
+            tokio::time::timeout(Duration::from_secs(25), async {
+                while received.len() < 2 {
+                    tokio::select! {
+                        _ = hub.select_next_some() => {}
+                        event = leaf.select_next_some() => {
+                            if let SwarmEvent::Behaviour(BlossomSubEvent::Message { message, .. }) = event {
+                                received.push(message.data);
+                            }
+                        }
+                    }
+                    if !published && hub.behaviour().peer_subscribed_to(&peer, &topic) {
+                        hub.behaviour_mut().publish(topic.clone(), expected[0].clone()).unwrap();
+                        // Exact duplicates remain successful no-ops; fresh nonces deliver.
+                        hub.behaviour_mut().publish(topic.clone(), expected[0].clone()).unwrap();
+                        hub.behaviour_mut().publish(topic.clone(), expected[1].clone()).unwrap();
+                        published = true;
+                    }
+                }
+                // Keep driving transport to detect an erroneously delivered duplicate.
+                let drain = tokio::time::sleep(Duration::from_millis(250));
+                tokio::pin!(drain);
+                loop {
+                    tokio::select! {
+                        _ = &mut drain => break,
+                        _ = hub.select_next_some() => {},
+                        event = leaf.select_next_some() => {
+                            if let SwarmEvent::Behaviour(BlossomSubEvent::Message { message, .. }) = event {
+                                received.push(message.data);
+                            }
+                        }
+                    }
+                }
+            }).await.expect("CW deliveries complete");
+            received.sort();
+            assert_eq!(received, expected);
+            if enabled {
+                let mut metrics = String::new();
+                prometheus_client::encoding::text::encode(
+                    &mut metrics, &leaf.behaviour().metrics_registry.lock().unwrap(),
+                ).unwrap();
+                assert!(metrics.contains("stage=\"receive_unique\""));
+                assert!(metrics.contains("observation=\"nonce_changed_repeat\""));
+                let mut metrics = String::new();
+                prometheus_client::encoding::text::encode(
+                    &mut metrics, &hub.behaviour().metrics_registry.lock().unwrap(),
+                ).unwrap();
+                assert!(metrics.contains("outcome=\"duplicate\""));
+                assert!(metrics.contains("outcome=\"published\""));
+            }
+            received
+        }
+        assert_eq!(exchange(false).await, exchange(true).await);
     }
 
     /// A message published at the hub reaches every subscribed leaf. Star
