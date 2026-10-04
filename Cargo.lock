@@ -6240,6 +6240,7 @@ dependencies = [
  "bs58",
  "bytes",
  "clatter",
+ "commonware-codec",
  "ed448-rust",
  "futures",
  "hex 0.4.3",

@@ -24,7 +24,7 @@ pub(crate) struct TrafficMessage<'a> {
 
 const MAX_ENTRIES: usize = 32_768;
 const RETENTION: Duration = Duration::from_secs(60);
-const MAX_BODY_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 256 * 1024;
 const HASH_BYTES_PER_SECOND: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -59,6 +59,7 @@ struct Seen {
 }
 
 pub(crate) struct CwTrafficDiagnostics {
+    resolver: crate::resolver_traffic_diagnostics::ResolverTrafficDiagnostics,
     messages: Family<TrafficLabels, Counter>,
     payload_bytes: Family<TrafficLabels, Counter>,
     observations: Family<RepeatLabels, Counter>,
@@ -148,6 +149,9 @@ impl CwTrafficDiagnostics {
             expirations.clone(),
         );
         Self {
+            resolver: crate::resolver_traffic_diagnostics::ResolverTrafficDiagnostics::new(
+                registry,
+            ),
             messages,
             payload_bytes,
             observations,
@@ -224,6 +228,14 @@ impl CwTrafficDiagnostics {
             self.skip(stage, channel, "malformed", message.data.len());
             return;
         };
+        if now.duration_since(self.budget_start) >= Duration::from_secs(1) {
+            self.budget_start = now;
+            self.budget_remaining = HASH_BYTES_PER_SECOND;
+        }
+        if channel == "resolver" {
+            self.resolver
+                .observe(stage, message, body, now, &mut self.budget_remaining);
+        }
         let Some(author) = message.source else {
             self.skip(stage, channel, "missing_author", body.len());
             return;
@@ -231,10 +243,6 @@ impl CwTrafficDiagnostics {
         if body.len() > MAX_BODY_BYTES {
             self.skip(stage, channel, "oversize", body.len());
             return;
-        }
-        if now.duration_since(self.budget_start) >= Duration::from_secs(1) {
-            self.budget_start = now;
-            self.budget_remaining = HASH_BYTES_PER_SECOND;
         }
         // Charge fixed fields too: empty bodies cannot bypass the CPU budget.
         let author = author.to_bytes();

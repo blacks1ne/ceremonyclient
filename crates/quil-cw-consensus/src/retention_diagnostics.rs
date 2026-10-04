@@ -87,6 +87,66 @@ pub(crate) fn view_snapshot(encoded: &str) -> ViewSnapshot {
     }
 }
 
+/// Resolver counters are aggregate outcomes, not a count of matched wire replies.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ResolverSnapshot {
+    pub(crate) fetch_success: Option<u64>,
+    pub(crate) fetch_failure: Option<u64>,
+    pub(crate) serve_success: Option<u64>,
+    pub(crate) serve_failure: Option<u64>,
+    pub(crate) fetch_active: Option<u64>,
+    pub(crate) fetch_pending: Option<u64>,
+    pub(crate) serve_processing: Option<u64>,
+}
+
+pub(crate) fn resolver_snapshot(encoded: &str) -> ResolverSnapshot {
+    fn metric(encoded: &str, suffix: &str, status: Option<&str>) -> Option<u64> {
+        let mut declaration = None;
+        let mut found = None;
+        for line in encoded.lines() {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                let name = rest.split_whitespace().next()?;
+                let declared_suffix = suffix.strip_suffix("_total").unwrap_or(suffix);
+                if name.ends_with(declared_suffix) {
+                    if declaration.replace(name).is_some() {
+                        return None;
+                    }
+                }
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.rsplit_once(' ') else {
+                continue;
+            };
+            let name = key.split('{').next()?;
+            if !name.ends_with(suffix) {
+                continue;
+            }
+            let expected = status.map(|value| format!("{{status=\"{value}\"}}"));
+            if key.strip_prefix(name)? != expected.as_deref().unwrap_or("") {
+                continue;
+            }
+            if found.replace(value.parse::<u64>().ok()?).is_some() {
+                return None;
+            }
+        }
+        // An explicitly registered empty counter family has zero observations;
+        // an absent/ambiguous family is unknown. Never dump arbitrary labels.
+        found.or_else(|| declaration.map(|_| 0))
+    }
+    ResolverSnapshot {
+        fetch_success: metric(encoded, "_resolver_fetch_total", Some("Success")),
+        fetch_failure: metric(encoded, "_resolver_fetch_total", Some("Failure")),
+        serve_success: metric(encoded, "_resolver_serve_total", Some("Success")),
+        serve_failure: metric(encoded, "_resolver_serve_total", Some("Failure")),
+        fetch_active: metric(encoded, "_resolver_fetch_active", None),
+        fetch_pending: metric(encoded, "_resolver_fetch_pending", None),
+        serve_processing: metric(encoded, "_resolver_serve_processing", None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +205,35 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[test]
+    fn resolver_outcomes_read_the_runtime_registry_without_sensitive_labels() {
+        use commonware_runtime::telemetry::metrics::{status, GaugeExt as _, MetricsExt as _};
+        use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
+        deterministic::Runner::default().start(|context| async move {
+            let resolver = context.child("consensus").child("engine").child("resolver");
+            let fetch: status::Counter = resolver.family("fetch", "fetches");
+            let serve: status::Counter = resolver.family("serve", "serves");
+            let active = resolver.gauge("fetch_active", "active");
+            active.try_set(4).unwrap();
+            fetch.inc_by(status::Status::Success, 3);
+            fetch.inc_by(status::Status::Failure, 2);
+            serve.inc_by(status::Status::Success, 7);
+            let result = resolver_snapshot(&context.encode());
+            assert_eq!(result.fetch_success, Some(3));
+            assert_eq!(result.fetch_failure, Some(2));
+            assert_eq!(result.serve_success, Some(7));
+            assert_eq!(result.serve_failure, Some(0));
+            assert_eq!(result.fetch_active, Some(4));
+            assert_eq!(result.fetch_pending, None);
+        });
+        assert_eq!(resolver_snapshot(""), ResolverSnapshot::default());
+        assert_eq!(
+            resolver_snapshot("x_resolver_fetch_total{status=\"Success\"} NaN").fetch_success,
+            None
+        );
+        assert_eq!(resolver_snapshot("x_resolver_fetch_total{status=\"Success\"} 2\ny_resolver_fetch_total{status=\"Success\"} 3").fetch_success, None);
     }
 
     #[derive(Default)]

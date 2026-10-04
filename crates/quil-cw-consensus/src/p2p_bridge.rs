@@ -48,21 +48,23 @@ impl std::fmt::Display for Closed {
 impl std::error::Error for Closed {}
 
 /// commonware-p2p `Sender` that enqueues outbound messages for the node.
-pub struct ChannelSender<P> {
+pub struct ChannelSender<P: PublicKey> {
     channel: u64,
     peers: Arc<[P]>,
     out: mpsc::UnboundedSender<Outbound<P>>,
     /// Own key and inbound queue: broadcasts are also delivered locally.
     echo: Option<(P, mpsc::UnboundedSender<Message<P>>)>,
+    resolver_matches: Option<Arc<crate::resolver_match_diagnostics::ResolverMatches<P>>>,
 }
 
-impl<P: Clone> Clone for ChannelSender<P> {
+impl<P: PublicKey> Clone for ChannelSender<P> {
     fn clone(&self) -> Self {
         Self {
             channel: self.channel,
             peers: self.peers.clone(),
             out: self.out.clone(),
             echo: self.echo.clone(),
+            resolver_matches: self.resolver_matches.clone(),
         }
     }
 }
@@ -86,6 +88,7 @@ impl<P: PublicKey> LimitedSender for ChannelSender<P> {
             recipients,
             out: self.out.clone(),
             echo: self.echo.clone(),
+            resolver_matches: self.resolver_matches.clone(),
         })
     }
 }
@@ -93,11 +96,12 @@ impl<P: PublicKey> LimitedSender for ChannelSender<P> {
 // `Sender` is auto-implemented for any `LimitedSender` via a blanket impl.
 
 /// Checked sender returned by [`ChannelSender`].
-pub struct ChannelCheckedSender<P> {
+pub struct ChannelCheckedSender<P: PublicKey> {
     channel: u64,
     recipients: Vec<P>,
     out: mpsc::UnboundedSender<Outbound<P>>,
     echo: Option<(P, mpsc::UnboundedSender<Message<P>>)>,
+    resolver_matches: Option<Arc<crate::resolver_match_diagnostics::ResolverMatches<P>>>,
 }
 
 impl<P: PublicKey> CheckedSender for ChannelCheckedSender<P> {
@@ -110,6 +114,9 @@ impl<P: PublicKey> CheckedSender for ChannelCheckedSender<P> {
     fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
         let mut bufs: IoBufs = message.into();
         let bytes = bufs.copy_to_bytes(bufs.remaining()).to_vec();
+        if let Some(diag) = &self.resolver_matches {
+            diag.request(&self.recipients, &bytes);
+        }
         if let Some((me, inbound)) = self.echo {
             let _ = inbound.send(inbound_message(me, bytes.clone()));
         }
@@ -125,8 +132,9 @@ impl<P: PublicKey> CheckedSender for ChannelCheckedSender<P> {
 
 /// commonware-p2p `Receiver` that yields messages the node fed in.
 #[derive(Debug)]
-pub struct ChannelReceiver<P> {
+pub struct ChannelReceiver<P: PublicKey> {
     rx: mpsc::UnboundedReceiver<Message<P>>,
+    pub(crate) resolver_matches: Option<Arc<crate::resolver_match_diagnostics::ResolverMatches<P>>>,
 }
 
 impl<P: PublicKey> Receiver for ChannelReceiver<P> {
@@ -134,13 +142,17 @@ impl<P: PublicKey> Receiver for ChannelReceiver<P> {
     type PublicKey = P;
 
     async fn recv(&mut self) -> Result<Message<P>, Self::Error> {
-        self.rx.recv().await.ok_or(Closed)
+        let message = self.rx.recv().await.ok_or(Closed)?;
+        if let Some(diag) = &self.resolver_matches {
+            diag.response(&message.0, message.1.as_ref());
+        }
+        Ok(message)
     }
 }
 
 /// A wired-up channel: the `(sender, receiver)` pair for `engine.start`, plus
 /// the `inbound_tx` the node uses to deliver demuxed `:8340` messages.
-pub struct P2pChannel<P> {
+pub struct P2pChannel<P: PublicKey> {
     pub sender: ChannelSender<P>,
     pub receiver: ChannelReceiver<P>,
     /// Node feeds `(from_pubkey, IoBuf)` here for messages received on this channel.
@@ -154,9 +166,11 @@ pub fn build_channel<P: PublicKey>(
     out: mpsc::UnboundedSender<Outbound<P>>,
 ) -> P2pChannel<P> {
     let (inbound_tx, rx) = mpsc::unbounded_channel();
+    let resolver_matches = (channel == 2 && std::env::var("QUIL_DIAG_CW_TRAFFIC").as_deref() == Ok("1"))
+        .then(|| Arc::new(crate::resolver_match_diagnostics::ResolverMatches::new()));
     P2pChannel {
-        sender: ChannelSender { channel, peers, out, echo: None },
-        receiver: ChannelReceiver { rx },
+        sender: ChannelSender { channel, peers, out, echo: None, resolver_matches: resolver_matches.clone() },
+        receiver: ChannelReceiver { rx, resolver_matches },
         inbound_tx,
     }
 }
@@ -254,6 +268,42 @@ mod tests {
         let (from, buf) = futures::executor::block_on(ch.receiver.recv()).expect("recv");
         assert_eq!(from, a);
         assert_eq!(buf.as_ref(), b"cert-msg");
+    }
+
+    #[test]
+    fn resolver_matching_preserves_targeted_outbound_and_inbound_delivery() {
+        let a = FalconPrivateKey::random(commonware_utils::TestRng::new(1)).public_key();
+        let b = FalconPrivateKey::random(commonware_utils::TestRng::new(2)).public_key();
+        assert_ne!(a, b);
+        let request = [0u64.to_be_bytes().as_slice(), &[0], 7u64.to_be_bytes().as_slice()].concat();
+        let response = [0u64.to_be_bytes().as_slice(), &[1, 1, 9]].concat();
+        let mut runs = Vec::new();
+        for enabled in [false, true] {
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+            let mut ch = build_channel(2, Arc::from(vec![a.clone(), b.clone()]), out_tx);
+            let diag = enabled.then(|| Arc::new(crate::resolver_match_diagnostics::ResolverMatches::new()));
+            ch.sender.resolver_matches = diag.clone();
+            ch.receiver.resolver_matches = diag.clone();
+            assert_eq!(ch.sender.send(Recipients::One(a.clone()), request.clone(), true).len(),1);
+            let out = out_rx.try_recv().unwrap();
+            assert_eq!(out.recipients, vec![a.clone()]);
+            assert_eq!(out.bytes, request);
+            let mut delivered = Vec::new();
+            for from in [&a, &b] {
+                ch.inbound_tx.send(inbound_message(from.clone(), response.clone())).unwrap();
+                let (from, data) = futures::executor::block_on(ch.receiver.recv()).unwrap();
+                delivered.push((from, data.as_ref().to_vec()));
+            }
+            if let Some(diag) = diag {
+                let snapshot = diag.snapshot().unwrap();
+                assert_eq!(snapshot.requests,1);
+                assert_eq!(snapshot.recipient_targets,1);
+                assert_eq!(snapshot.expected_candidates,1);
+                assert_eq!(snapshot.unmatched_candidates,1);
+            }
+            runs.push(delivered);
+        }
+        assert_eq!(runs[0],runs[1]);
     }
 
     #[test]

@@ -6,6 +6,8 @@ license = "Apache-2.0"
 description = "P2P networking with BlossomSub pubsub for the Quilibrium node"
 
 [dev-dependencies]
+# Check diagnostic wire decoding against the consensus codec.
+commonware-codec = "=2026.7.0"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 [dependencies]

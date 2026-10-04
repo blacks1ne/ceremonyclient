@@ -252,6 +252,7 @@ where
     ];
     let (s0, r0) = (ch0.sender, ch0.receiver);
     let (s1, r1) = (ch1.sender, ch1.receiver);
+    let resolver_matches = ch2.receiver.resolver_matches.clone();
     let (s2, r2) = (ch2.sender, ch2.receiver);
 
     let instance = crate::retention_diagnostics::next_instance();
@@ -293,6 +294,7 @@ where
             // host is dead (`thread.is_finished()`) and rebuild it.
             let mut handle = engine.start((s0, r0), (s1, r1), (s2, r2));
             let mut stopped = None;
+            let traffic_diagnostics = std::env::var("QUIL_DIAG_CW_TRAFFIC").as_deref() == Ok("1");
             let mut retention_tick = tokio::time::interval(Duration::from_secs(60));
             retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -305,7 +307,28 @@ where
                 }
                 tokio::select! {
                     _ = retention_tick.tick() => {
-                        let snapshot = crate::retention_diagnostics::view_snapshot(&context.encode());
+                        let encoded = context.encode();
+                        let snapshot = crate::retention_diagnostics::view_snapshot(&encoded);
+                        if traffic_diagnostics {
+                            let resolver = crate::retention_diagnostics::resolver_snapshot(&encoded);
+                            if let Some(matches) = resolver_matches.as_ref().and_then(|diag| diag.snapshot()) {
+                                tracing::info!(instance, epoch,
+                                    requests = matches.requests, recipient_targets = matches.recipient_targets,
+                                    expected_candidates = matches.expected_candidates, expected_bytes = matches.expected_bytes,
+                                    additional_candidates = matches.additional_candidates, additional_bytes = matches.additional_bytes,
+                                    unmatched_candidates = matches.unmatched_candidates, unmatched_bytes = matches.unmatched_bytes,
+                                    evictions = matches.evictions, expirations = matches.expirations,
+                                    untracked_recipients = matches.untracked_recipients, entries = matches.entries,
+                                    "consensus resolver request match snapshot");
+                            }
+
+                            tracing::info!(instance, epoch,
+                                fetch_success = ?resolver.fetch_success, fetch_failure = ?resolver.fetch_failure,
+                                serve_success = ?resolver.serve_success, serve_failure = ?resolver.serve_failure,
+                                fetch_active = ?resolver.fetch_active, fetch_pending = ?resolver.fetch_pending,
+                                serve_processing = ?resolver.serve_processing,
+                                "consensus resolver outcome snapshot");
+                        }
                         let finalized = observations.finalized.load(std::sync::atomic::Ordering::Relaxed);
                         let notarized = observations.notarized.load(std::sync::atomic::Ordering::Relaxed);
                         tracing::info!(instance, epoch,

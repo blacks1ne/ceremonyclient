@@ -56,3 +56,5 @@ pub mod p2p_bridge;
 /// Assemble the global-consensus committee (`Set<FalconPublicKey>` + this node's
 /// `SimplexFalconScheme`) from `q-consensus-key` material.
 pub mod committee;
+
+mod resolver_match_diagnostics;

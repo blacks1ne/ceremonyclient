@@ -871,11 +871,21 @@ mod propagation_tests {
                 data.extend_from_slice(b"same vote body");
                 data
             };
-            let expected = vec![payload(1), payload(2)];
+            let mut expected = vec![payload(1), payload(2)];
+            for (nonce, id) in [(3u64, 7u64), (4, 8)] {
+                use commonware_codec::Write;
+                let mut framed = vec![0x82];
+                framed.extend_from_slice(&nonce.to_be_bytes());
+                id.write(&mut framed);
+                1u8.write(&mut framed);
+                bytes::Bytes::from_static(b"certificate content").write(&mut framed);
+                expected.push(framed);
+            }
+            expected.sort();
             let mut received = Vec::new();
             let mut published = false;
             tokio::time::timeout(Duration::from_secs(25), async {
-                while received.len() < 2 {
+                while received.len() < expected.len() {
                     tokio::select! {
                         _ = hub.select_next_some() => {}
                         event = leaf.select_next_some() => {
@@ -888,7 +898,9 @@ mod propagation_tests {
                         hub.behaviour_mut().publish(topic.clone(), expected[0].clone()).unwrap();
                         // Exact duplicates remain successful no-ops; fresh nonces deliver.
                         hub.behaviour_mut().publish(topic.clone(), expected[0].clone()).unwrap();
-                        hub.behaviour_mut().publish(topic.clone(), expected[1].clone()).unwrap();
+                        for data in expected.iter().skip(1) {
+                            hub.behaviour_mut().publish(topic.clone(), data.clone()).unwrap();
+                        }
                         published = true;
                     }
                 }
@@ -916,6 +928,8 @@ mod propagation_tests {
                 ).unwrap();
                 assert!(metrics.contains("stage=\"receive_unique\""));
                 assert!(metrics.contains("observation=\"nonce_changed_repeat\""));
+                assert!(metrics.contains("kind=\"response\""));
+                assert!(metrics.contains("observation=\"repeat_same_author_changed_id\""));
                 let mut metrics = String::new();
                 prometheus_client::encoding::text::encode(
                     &mut metrics, &hub.behaviour().metrics_registry.lock().unwrap(),

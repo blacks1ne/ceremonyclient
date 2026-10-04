@@ -1,6 +1,7 @@
 pub mod blossomsub_behaviour;
 pub mod direct;
 mod cw_traffic_diagnostics;
+mod resolver_traffic_diagnostics;
 pub mod ed448_identity;
 pub mod falcon_identity;
 pub mod ed448_noise;
