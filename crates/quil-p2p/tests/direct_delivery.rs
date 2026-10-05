@@ -95,6 +95,14 @@ async fn a_direct_message_reaches_its_connected_peer_on_an_allowed_bitmask() {
     assert_eq!(receiver.direct_stats().received_queue_full, 0);
     sender.note_direct_fallback(9);
     assert_eq!(sender.direct_stats().fallback_payload_bytes, 9);
+    receiver.allow_direct(vec![1, 7, 7]).await;
+    drop(inbound);
+    assert_eq!(
+        sender.send_direct(receiver_id, vec![1, 7, 7], vec![7]).await,
+        DirectOutcome::Refused
+    );
+    assert_eq!(receiver.direct_stats().received_queue_closed, 1);
+    assert_eq!(receiver.direct_stats().received_unauthorized, 2);
 }
 
 /// A connected peer without this network's protocol follows the compatibility
@@ -134,5 +142,6 @@ async fn incompatible_direct_protocol_is_reported_and_cached() {
         DirectOutcome::Unsupported
     );
     assert_eq!(sender.direct_stats().unsupported, 2);
+    assert_eq!(sender.direct_stats().unsupported_negotiations, 1);
     assert_eq!(sender.direct_stats().delivered_payload_bytes, 0);
 }

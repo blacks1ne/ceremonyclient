@@ -968,6 +968,7 @@ impl P2PNode {
                                         Event::OutboundFailure { peer, request_id, error, .. } => {
                                             let outcome = match error {
                                                 OutboundFailure::UnsupportedProtocols => {
+                                                    direct_stats.unsupported_negotiations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                     direct_unsupported.insert(peer, std::time::Instant::now());
                                                     DirectOutcome::Unsupported
                                                 }

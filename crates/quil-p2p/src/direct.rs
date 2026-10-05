@@ -81,6 +81,7 @@ pub struct DirectStats {
     pub received_queue_full: AtomicU64,
     pub received_queue_closed: AtomicU64,
     pub failed_timeout: AtomicU64,
+    pub unsupported_negotiations: AtomicU64,
 }
 
 /// A point-in-time copy of [`DirectStats`].
@@ -105,6 +106,7 @@ pub struct DirectStatsSnapshot {
     pub received_queue_full: u64,
     pub received_queue_closed: u64,
     pub failed_timeout: u64,
+    pub unsupported_negotiations: u64,
 }
 
 impl DirectStats {
@@ -141,6 +143,7 @@ impl DirectStats {
             received_queue_full: get(&self.received_queue_full),
             received_queue_closed: get(&self.received_queue_closed),
             failed_timeout: get(&self.failed_timeout),
+            unsupported_negotiations: get(&self.unsupported_negotiations),
         }
     }
 }

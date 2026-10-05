@@ -401,6 +401,7 @@ pub(crate) fn spawn(sup: &mut Supervisor<anyhow::Error>, args: MessageLoopArgs) 
                         direct_received_queue_full = direct.received_queue_full,
                         direct_received_queue_closed = direct.received_queue_closed,
                         direct_failed_timeout = direct.failed_timeout,
+                        direct_unsupported_negotiations = direct.unsupported_negotiations,
                         rdrop_peer_info = router_drops_peer_info,
                         rdrop_prover = router_drops_prover,
                         rdrop_frame = router_drops_frame,
