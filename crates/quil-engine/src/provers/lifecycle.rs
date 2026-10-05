@@ -477,6 +477,10 @@ impl LifecycleReadiness {
 
 /// Tracks the lifecycle state for this node's prover.
 pub struct ProverLifecycle {
+    /// Serialize candidate construction and accepted-plan bookkeeping across
+    /// the gossip and poller callers. No network work runs under this lock.
+    evaluation_lock: std::sync::Mutex<()>,
+    leave_decisions: super::leave_decisions::LeaveDecisions,
     /// This node's prover address (32 bytes, Poseidon hash of BLS pubkey).
     pub prover_address: Vec<u8>,
     /// Whether a VDF computation is currently in progress. While set,
@@ -595,7 +599,7 @@ pub struct ProverLifecycle {
     /// leave-confirm / seniority-merge paths run regardless of this
     /// gate since they depend on local pending state, not shard sizes.
     shard_info_loaded: AtomicBool,
-    pub(crate) confirmation_attempts: Arc<crate::confirmation_attempts::ConfirmationAttempts>,
+    pub(crate) submission_attempts: Arc<crate::submission_attempts::SubmissionAttempts>,
     /// Set on a node whose registry learns the chain's split and merge
     /// reassignments only from prover-tree syncs: a regular node's own grid
     /// never flips. A gone shard (split away or retired) it still holds
@@ -626,6 +630,8 @@ impl ProverLifecycle {
         strategy: Strategy,
     ) -> Self {
         Self {
+            evaluation_lock: std::sync::Mutex::new(()),
+            leave_decisions: super::leave_decisions::LeaveDecisions::default(),
             prover_address,
             proof_in_progress: AtomicBool::new(false),
             initial_sync_complete: AtomicBool::new(false),
@@ -645,7 +651,7 @@ impl ProverLifecycle {
             last_leave_attempt: RwLock::new(HashMap::new()),
             last_join_attempt: RwLock::new(HashMap::new()),
             shard_info_loaded: AtomicBool::new(false),
-            confirmation_attempts: Arc::new(crate::confirmation_attempts::ConfirmationAttempts::default()),
+            submission_attempts: Arc::new(crate::submission_attempts::SubmissionAttempts::default()),
             gone_shard_leaves_await_sync: AtomicBool::new(false),
             registry_syncs_begun: AtomicU64::new(0),
             registry_synced_through: AtomicU64::new(0),
@@ -864,6 +870,11 @@ impl ProverLifecycle {
         self.prover_root_verified_frame.store(frame, Ordering::Relaxed);
     }
 
+    /// Load durable rejection decisions before enabling lifecycle dispatch.
+    pub fn configure_leave_decision_store(&self, db: Arc<quil_store::RocksDb>) -> Result<()> {
+        self.leave_decisions.attach(db, &self.prover_address)
+    }
+
     /// Record a successful `ProverJoin` submission at `frame_number`.
     /// Called by the pipeline AFTER `publish_prover_message` succeeds
     /// so transient archive failures don't burn the 4-frame join
@@ -973,6 +984,29 @@ impl ProverLifecycle {
         };
         for f in filters {
             guard.insert(f.clone(), frame_number);
+        }
+    }
+
+    /// Commit retry bookkeeping only after the complete plan was accepted.
+    /// Publication and registry acknowledgement remain distinct steps.
+    fn commit_plan_attempts(&self, actions: &[LifecycleAction], frame: u64, forced_rejection: bool) {
+        for action in actions {
+            match action {
+                LifecycleAction::ProposeJoin { filters, .. } => {
+                    self.record_join_filter_attempts(filters, frame);
+                }
+                LifecycleAction::ProposeLeave { filters, .. } => {
+                    self.allocator.set_last_join_attempt(frame);
+                    self.record_leave_attempts(filters, frame);
+                }
+                LifecycleAction::RejectJoins { .. } if forced_rejection => {
+                    self.allocator.set_last_reject_attempt(frame);
+                }
+                LifecycleAction::ProposeSeniorityMerge { .. } => {
+                    self.allocator.set_last_seniority_merge_attempt(frame);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1222,6 +1256,9 @@ impl ProverLifecycle {
             return Ok(Vec::new());
         }
 
+        let _evaluation = self.evaluation_lock.lock().map_err(|_|
+            quil_types::error::QuilError::Internal("lifecycle evaluation lock poisoned".into()))?;
+
         // `CurrentFrame` is advanced upstream by the BlossomSub
         // recv path / archive poller / materializer — every
         // reachable production caller of `evaluate` has already
@@ -1243,8 +1280,10 @@ impl ProverLifecycle {
         }
 
         // Gather inputs
-        let summaries = registry.get_prover_shard_summaries(frame_number)?;
-        let prover_info = registry.get_prover_info(&self.prover_address)?;
+        let registry_view = registry.get_lifecycle_view(&self.prover_address, frame_number)?;
+        let summaries = registry_view.summaries;
+        let prover_info = registry_view.prover;
+        let membership = registry_view.members;
         let workers = worker_manager.range_workers()?;
         let worker_view = WorkerView::from_workers(workers.clone());
 
@@ -1597,6 +1636,7 @@ impl ProverLifecycle {
 
         let mut actions: Vec<LifecycleAction> = Vec::new();
         let mut join_proposed_this_cycle = false;
+        let mut forced_rejection = false;
 
         // PoRep epoch rotation: any Active allocation whose recorded storage
         // epoch is not registered ahead must confirm leaf roots for the next
@@ -1650,7 +1690,6 @@ impl ProverLifecycle {
                 // Record attempt eagerly so duplicate evaluates within
                 // the cooldown don't re-emit; the pipeline will log if
                 // the actual submission fails.
-                self.allocator.set_last_seniority_merge_attempt(frame_number);
                 actions.push(LifecycleAction::ProposeSeniorityMerge { frame_number });
             }
         }
@@ -1691,7 +1730,7 @@ impl ProverLifecycle {
                     reason = "pending join count exceeds remaining worker capacity",
                     "forced rejection of excess pending joins"
                 );
-                self.allocator.set_last_reject_attempt(frame_number);
+                forced_rejection = true;
                 actions.push(LifecycleAction::RejectJoins { filters, frame_number });
             } else {
                 tracing::debug!(
@@ -1720,7 +1759,6 @@ impl ProverLifecycle {
                         && frame_number - last_join
                             >= crate::worker_allocator::JOIN_COOLDOWN_FRAMES);
                 if cooldown_ok {
-                    self.allocator.set_last_join_attempt(frame_number);
                     let mm_count = workers
                         .iter()
                         .filter(|w| w.manually_managed && !w.filter.is_empty())
@@ -1869,10 +1907,8 @@ impl ProverLifecycle {
                     let worker_ids: Vec<u32> = proposals.iter().map(|p| p.worker_id).collect();
                     let filters: Vec<Vec<u8>> = proposals.into_iter().map(|p| p.filter).collect();
 
-                    // Stamp the per-filter Join cooldown before
-                    // emitting the action so the next cycle sees
-                    // these filters as in-flight and excludes them.
-                    self.record_join_filter_attempts(&filters, frame_number);
+                    // The accepted plan commits per-filter cooldowns. Keep
+                    // this cycle's candidates explicit until compilation.
 
                     info!(
                         filters = filters.len(),
@@ -2028,7 +2064,12 @@ impl ProverLifecycle {
 
         // A worker or recent submission already reserves its destination even
         // before the allocation appears in the registry. It cannot fund a leave.
-        let inflight = self.filters_with_inflight_join(frame_number);
+        let mut inflight = self.filters_with_inflight_join(frame_number);
+        for action in &actions {
+            if let LifecycleAction::ProposeJoin { filters, .. } = action {
+                inflight.extend(filters.iter().cloned());
+            }
+        }
         let available_replacements: Vec<ShardDescriptor> = proposal_descriptors.iter()
             .filter(|d| !inflight.contains(&d.filter)
                 && !workers.iter().any(|w| w.filter == d.filter))
@@ -2289,13 +2330,9 @@ impl ProverLifecycle {
             // A halt-risk swap sheds only an allocation whose shard would
             // release this node; see `proposer::releasable_member`.
             let releasable = |filter: &[u8]| {
-                let mut members = Vec::new();
-                for status in [ProverStatus::Active, ProverStatus::Leaving] {
-                    if let Ok(provers) = registry.get_provers_by_status(filter, status) {
-                        members.extend(provers.into_iter().map(|p| p.address));
-                    }
-                }
-                proposer::releasable_member(&self.prover_address, filter, &members)
+                let members = membership.get(filter).cloned().unwrap_or_default();
+                let addresses: Vec<_> = members.active.into_iter().chain(members.leaving).collect();
+                proposer::releasable_member(&self.prover_address, filter, &addresses)
             };
             // The pending-confirm bucket excludes confirmed leaves serving
             // notice, so inspect effective allocation status instead. This
@@ -2412,8 +2449,6 @@ impl ProverLifecycle {
             }
 
             if !leave_candidates.is_empty() {
-                self.allocator.set_last_join_attempt(frame_number);
-                self.record_leave_attempts(&leave_candidates, frame_number);
                 // Each proposed leave by the first cause that picked it, for
                 // counting how many leaves a node proposes and why (a new
                 // shard drew leaves off several healthy ones on every node).
@@ -2517,8 +2552,13 @@ impl ProverLifecycle {
             let mut manual_ready: Vec<Vec<u8>> = Vec::new();
             let mut orphan_ready: Vec<Vec<u8>> = Vec::new();
             let mut auto_ready: Vec<Vec<u8>> = Vec::new();
+            let mut retained_rejections = Vec::new();
             for f in &ready_leave_filters {
-                if manual_bound_filters.contains(f) {
+                let leave_frame = leaving_filters.iter().find(|(filter, _)| filter == f)
+                    .map(|(_, frame)| *frame).expect("ready leave has a request");
+                if self.leave_decisions.rejected(f, leave_frame, frame_number)? {
+                    retained_rejections.push(f.clone());
+                } else if manual_bound_filters.contains(f) {
                     manual_ready.push(f.clone());
                 } else if !bound_filters.contains(f) || settled_split_away(f) || retired.contains(f)
                     || shard_sizes_snapshot.get(f) == Some(&0) {
@@ -2528,8 +2568,18 @@ impl ProverLifecycle {
                 }
             }
 
+            // Confirmed notice-period departures already provide future slots.
+            // Count only workers actually serving them, once per worker; local
+            // publication is not an authenticated confirmation.
+            let confirmed_departure_workers: std::collections::HashSet<u32> = workers.iter()
+                .filter(|w| !w.manually_managed && !w.filter.is_empty())
+                .filter(|w| prover_info.as_ref().is_some_and(|p| p.allocations.iter().any(|a|
+                    a.confirmation_filter == w.filter && a.leave_confirm_frame_number > 0
+                        && a.effective_status(frame_number) == quil_types::consensus::EffectiveStatus::Leaving)))
+                .map(|w| w.core_id).collect();
+
             // Auto bucket: score-driven decide_leaves on auto-bound.
-            let (mut auto_reject, auto_confirm) = proposer::decide_leaves_against_replacements(
+            let (mut auto_reject, auto_confirm) = proposer::decide_leaves_with_reserved_capacity(
                 &held_descriptors,
                 &available_replacements,
                 &auto_ready,
@@ -2537,6 +2587,7 @@ impl ProverLifecycle {
                 &world_bytes,
                 self.units,
                 self.strategy,
+                confirmed_departure_workers.len(),
             );
 
             // Halt-risk swap: `plan_leaves` sheds healthy allocations to
@@ -2546,28 +2597,38 @@ impl ProverLifecycle {
             // and rejected the same leaves each epoch while data shards had
             // no prover. While the demand
             // stands, confirm the leaves the shard can spare.
-            let mut swap_demand =
-                proposer::halt_risk_swap_demand(&available_replacements, assignable_worker_ids.len());
+            let mut swap_demand = proposer::halt_risk_swap_demand(
+                &available_replacements, assignable_worker_ids.len())
+                .saturating_sub(confirmed_departure_workers.len())
+                .saturating_sub(auto_confirm.len());
+            // Coverage may override reward, but spend the least valuable
+            // eligible holdings first rather than registry iteration order.
+            let ranked = proposer::rank_allocated_by_score_ascending(
+                &held_descriptors, difficulty, &world_bytes, self.units, self.strategy,
+                &std::collections::HashSet::new());
+            auto_reject.sort_by_key(|filter| ranked.iter().position(|(f, _)| f == filter)
+                .unwrap_or(usize::MAX));
             let mut swap_confirm: Vec<Vec<u8>> = Vec::new();
             auto_reject.retain(|filter| {
                 if swap_demand == 0 {
                     return true;
                 }
-                let addresses = |status| {
-                    registry
-                        .get_provers_by_status(filter, status)
-                        .map(|provers| provers.into_iter().map(|p| p.address).collect::<Vec<_>>())
-                        .unwrap_or_default()
-                };
-                let active = addresses(ProverStatus::Active).len();
-                let leaving = addresses(ProverStatus::Leaving);
-                if !proposer::chosen_to_depart(&self.prover_address, filter, active, &leaving) {
+                let members = membership.get(filter).cloned().unwrap_or_default();
+                if !proposer::chosen_to_depart(&self.prover_address, filter,
+                    members.active.len(), &members.leaving) {
                     return true;
                 }
                 swap_confirm.push(filter.clone());
                 swap_demand -= 1;
                 false
             });
+
+            auto_reject.extend(retained_rejections);
+            info!(frame = frame_number, score = auto_confirm.len(),
+                halt_risk_swap = swap_confirm.len(), orphan = orphan_ready.len(),
+                manual = manual_ready.len(), reject = auto_reject.len(),
+                confirmed_departure_workers = confirmed_departure_workers.len(),
+                "lifecycle leave decision causes");
 
             // Manual + orphan: always confirm at window, no auto-reject.
             // Order: auto confirms, then swaps, then orphans, then
@@ -2606,7 +2667,16 @@ impl ProverLifecycle {
         // intent per shard before asynchronous dispatch. Unexpected conflicts
         // fail closed for this cycle; no partial batch is published.
         match super::plan::LifecyclePlan::compile(frame_number, actions) {
-            Ok(plan) => Ok(plan.into_actions()),
+            Ok(plan) => {
+                let actions = plan.into_actions();
+                let rejected: Vec<(Vec<u8>, u64)> = actions.iter().filter_map(|a| match a {
+                    LifecycleAction::RejectLeaves { filters, .. } => Some(filters), _ => None,
+                }).flatten().filter_map(|filter| leaving_filters.iter()
+                    .find(|(f, _)| f == filter).cloned()).collect();
+                self.leave_decisions.commit(&rejected, frame_number)?;
+                self.commit_plan_attempts(&actions, frame_number, forced_rejection);
+                Ok(actions)
+            },
             Err(error) => {
                 tracing::warn!(frame = frame_number, %error,
                     "lifecycle plan rejected before dispatch");
@@ -3684,16 +3754,52 @@ mod proposal_loop_tests {
         leaving.leave_frame_number = 10;
         reg.set_prover(prover(address.clone(), vec![leaving, alloc(better_held.clone(), ProverStatus::Active, 10)]));
         reg.set_summaries(vec![shard_summary(held.clone(), 53), shard_summary(better_held.clone(), 59), shard_summary(available.clone(), 8)]);
-        let lc = make_lifecycle(address, wm.clone(), reg.clone());
+        let lc = make_lifecycle(address.clone(), wm.clone(), reg.clone());
         lc.set_remote_shard_metrics(HashMap::from([(held.clone(), (1_000_000, 1)), (better_held, (100_000_000, 1)), (available.clone(), (100_000, 1))]));
         lc.set_prover_root_verified_frame(720);
         let actions = lc.evaluate(720, 50_000, reg.as_ref(), wm.as_ref()).unwrap();
         assert!(actions.iter().any(|a| matches!(a, LifecycleAction::RejectLeaves { filters, .. } if filters.contains(&held))), "keep a profitable holding despite a richer shard we already hold; actions={actions:?}");
         assert!(!actions.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { filters, .. } if filters.contains(&held))));
         // A genuinely better, unreserved destination still confirms the leave.
+        // A fresh lifecycle without this request's saved rejection provides
+        // the upgrade control; an accepted rejection is now stable.
+        let lc = make_lifecycle(address, wm.clone(), reg.clone());
+        lc.set_prover_root_verified_frame(720);
         lc.set_remote_shard_metrics(HashMap::from([(held.clone(), (1_000_000, 1)), (available, (100_000_000, 1))]));
         let actions = lc.evaluate(720, 50_000, reg.as_ref(), wm.as_ref()).unwrap();
         assert!(actions.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { filters, .. } if filters.contains(&held))), "genuine upgrades remain possible; actions={actions:?}");
+    }
+
+    #[test]
+    fn rejected_plan_does_not_consume_retry_cooldowns() {
+        let _epoch = super::buckets_tests::epoch_length_guard();
+        let address = vec![0xCD; 32];
+        let held = filter_bytes(0xA1);
+        let wm = Arc::new(ConfigurableWorkerManager::new());
+        wm.add(allocated_worker(1, held.clone()));
+        let reg = Arc::new(ConfigurableRegistry::new());
+        let mut active = alloc(held.clone(), ProverStatus::Active, 10);
+        active.epoch = 1;
+        // Inconsistent observation: the same filter is also a pending join.
+        // The complete plan must reject this instead of publishing a leave
+        // alongside a join decision. Then a corrected observation must retry
+        // immediately, not wait on attempts that were never dispatched.
+        reg.set_prover(prover(address.clone(), vec![active.clone(),
+            alloc(held.clone(), ProverStatus::Joining, 10)]));
+        reg.set_summaries(vec![shard_summary(held.clone(), 50)]);
+        let lc = make_lifecycle(address.clone(), wm.clone(), reg.clone());
+        lc.set_remote_shard_metrics(HashMap::from([(held.clone(), (0, 0))]));
+        lc.set_prover_root_verified_frame(725);
+        assert!(lc.evaluate(725, 50_000, reg.as_ref(), wm.as_ref()).is_err());
+        assert_eq!(lc.allocator.last_join_attempt(), 0);
+        assert_eq!(lc.allocator.last_reject_attempt(), 0);
+        assert!(lc.last_leave_attempt.read().unwrap().is_empty());
+        assert!(lc.last_join_attempt.read().unwrap().is_empty());
+        reg.set_prover(prover(address, vec![active]));
+        let actions = lc.evaluate(725, 50_000, reg.as_ref(), wm.as_ref()).unwrap();
+        assert_eq!(count_proposed_leaves(&actions), 1, "{actions:?}");
+        assert_eq!(lc.allocator.last_join_attempt(), 725);
+        assert_eq!(lc.last_leave_attempt.read().unwrap().get(&held), Some(&725));
     }
 
     #[test]
@@ -5140,6 +5246,82 @@ mod proposal_loop_tests {
             "orphan leave must NOT be rejected; got {:?}",
             actions
         );
+    }
+
+    #[test]
+    fn rejection_stays_fixed_after_archive_refresh_and_lifecycle_restart() {
+        let address = vec![0xCD; 32];
+        let held = filter_bytes(0xA1);
+        let waiting = filter_bytes(0xB0);
+        let wm = Arc::new(ConfigurableWorkerManager::new());
+        wm.add(allocated_worker(1, held.clone()));
+        let reg = Arc::new(ConfigurableRegistry::new());
+        let mut leaving = alloc(held.clone(), ProverStatus::Leaving, 10);
+        leaving.leave_frame_number = 90;
+        let mut peers: Vec<_> = (1u8..=5).map(|id| prover(vec![id; 32], vec![alloc(held.clone(), ProverStatus::Active, 10)])).collect();
+        let mut ours = prover(address.clone(), vec![leaving]);
+        ours.status = ProverStatus::Leaving;
+        peers.push(ours);
+        reg.set_provers(peers);
+        reg.set_summaries(vec![shard_summary(held.clone(), 20)]);
+        let db = Arc::new(quil_store::RocksDb::open_in_memory().unwrap());
+        let lc = make_lifecycle(address.clone(), wm.clone(), reg.clone());
+        lc.configure_leave_decision_store(db.clone()).unwrap();
+        lc.set_prover_root_verified_frame(800);
+        let first = lc.evaluate(800, 1, reg.as_ref(), wm.as_ref()).unwrap();
+        assert!(first.iter().any(|a| matches!(a, LifecycleAction::RejectLeaves { filters, .. } if filters.contains(&held))));
+        reg.set_summaries(vec![shard_summary(held.clone(), 20), shard_summary(waiting.clone(), 0)]);
+        let restarted = make_lifecycle(address.clone(), wm.clone(), reg.clone());
+        restarted.configure_leave_decision_store(db).unwrap();
+        restarted.set_remote_shard_metrics(HashMap::from([(held.clone(), (100, 1)), (waiting, (100, 1))]));
+        restarted.set_prover_root_verified_frame(900);
+        let after = restarted.evaluate(900, 1, reg.as_ref(), wm.as_ref()).unwrap();
+        assert!(after.iter().any(|a| matches!(a, LifecycleAction::RejectLeaves { filters, .. } if filters.contains(&held))));
+        assert!(!after.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { filters, .. } if filters.contains(&held))));
+        // Same API with no saved decision must exercise the changed policy.
+        let control = make_lifecycle(address, wm.clone(), reg.clone());
+        control.set_remote_shard_metrics(restarted.merged_shard_metrics());
+        control.set_prover_root_verified_frame(900);
+        let unsaved = control.evaluate(900, 1, reg.as_ref(), wm.as_ref()).unwrap();
+        assert!(unsaved.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { filters, .. } if filters.contains(&held))), "control must confirm: {unsaved:?}");
+    }
+
+    #[test]
+    fn confirmed_departure_covers_swap_demand_and_worst_holding_goes_first() {
+        let address = vec![0xCD; 32];
+        let valuable = filter_bytes(0xA1);
+        let weak = filter_bytes(0xA2);
+        let waiting = filter_bytes(0xB0);
+        let wm = Arc::new(ConfigurableWorkerManager::new());
+        wm.add(allocated_worker(1, valuable.clone()));
+        wm.add(allocated_worker(2, weak.clone()));
+        let reg = Arc::new(ConfigurableRegistry::new());
+        let mut high = alloc(valuable.clone(), ProverStatus::Leaving, 10);
+        high.leave_frame_number = 90;
+        let mut low = alloc(weak.clone(), ProverStatus::Leaving, 10);
+        low.leave_frame_number = 90;
+        let mut peers: Vec<_> = (1u8..=5).map(|id| prover(vec![id; 32], vec![alloc(valuable.clone(), ProverStatus::Active, 10), alloc(weak.clone(), ProverStatus::Active, 10)])).collect();
+        let mut ours = prover(address.clone(), vec![high.clone(), low.clone()]);
+        ours.status = ProverStatus::Leaving;
+        peers.push(ours);
+        reg.set_provers(peers);
+        reg.set_summaries(vec![shard_summary(valuable.clone(), 20), shard_summary(weak.clone(), 20), shard_summary(waiting.clone(), 0)]);
+        let decide = |confirmed: bool| {
+            let mut low = low.clone();
+            if confirmed { low.leave_confirm_frame_number = 750; }
+            let mut ours = prover(address.clone(), vec![high.clone(), low]);
+            ours.status = ProverStatus::Leaving;
+            reg.set_prover(ours);
+            let lc = make_lifecycle(address.clone(), wm.clone(), reg.clone());
+            lc.set_remote_shard_metrics(HashMap::from([(valuable.clone(), (100_000, 100)), (weak.clone(), (100, 1)), (waiting.clone(), (10, 1))]));
+            lc.set_prover_root_verified_frame(800);
+            lc.evaluate(800, 1, reg.as_ref(), wm.as_ref()).unwrap()
+        };
+        let initial = decide(false);
+        assert!(initial.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { filters, .. } if filters == &vec![weak.clone()])), "{initial:?}");
+        assert!(initial.iter().any(|a| matches!(a, LifecycleAction::RejectLeaves { filters, .. } if filters.contains(&valuable))));
+        let later = decide(true);
+        assert!(!later.iter().any(|a| matches!(a, LifecycleAction::ConfirmLeaves { .. })), "notice worker already funds the target: {later:?}");
     }
 
     // Every regular node sheds the same healthy shards to cover four
