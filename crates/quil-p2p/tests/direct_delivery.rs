@@ -45,6 +45,7 @@ async fn a_direct_message_reaches_its_connected_peer_on_an_allowed_bitmask() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut attempts = 0u64;
     let outcome = loop {
+        attempts += 1;
         let outcome = sender
             .send_direct(receiver_id, allowed.clone(), b"resolver response".to_vec())
             .await;
