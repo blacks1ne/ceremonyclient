@@ -43,6 +43,7 @@ async fn a_direct_message_reaches_its_connected_peer_on_an_allowed_bitmask() {
     receiver.allow_direct(allowed.clone()).await;
     // The sender dials its bootstrap peer on its first discovery tick.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut attempts = 0u64;
     let outcome = loop {
         let outcome = sender
             .send_direct(receiver_id, allowed.clone(), b"resolver response".to_vec())
@@ -84,7 +85,7 @@ async fn a_direct_message_reaches_its_connected_peer_on_an_allowed_bitmask() {
     );
     let stats = sender.direct_stats();
     assert_eq!((stats.delivered, stats.refused), (1, 2));
-    assert_eq!(stats.attempted_payload_bytes, 26);
+    assert_eq!(stats.attempted_payload_bytes, 17 * attempts + 9);
     assert_eq!(stats.delivered_payload_bytes, 17);
     assert_eq!(receiver.direct_stats().received, 1);
     assert_eq!(receiver.direct_stats().received_payload_bytes, 17);
@@ -93,4 +94,44 @@ async fn a_direct_message_reaches_its_connected_peer_on_an_allowed_bitmask() {
     assert_eq!(receiver.direct_stats().received_queue_full, 0);
     sender.note_direct_fallback(9);
     assert_eq!(sender.direct_stats().fallback_payload_bytes, 9);
+}
+
+/// A connected peer without this network's protocol follows the compatibility
+/// fallback path. A second send uses the remembered unsupported result.
+#[tokio::test]
+async fn incompatible_direct_protocol_is_reported_and_cached() {
+    let mut sup = quil_lifecycle::Supervisor::<anyhow::Error>::new();
+    let mut config = quil_config::P2PConfig::default();
+    config.network = 98;
+    config.bootstrap_peers = Vec::new();
+    config.direct_peers = Vec::new();
+    let receiver = P2PNode::new_with_options(&config, true, None).unwrap();
+    let receiver_id = receiver.peer_id;
+    let port = free_port();
+    let (_receiver, _inbound) = receiver
+        .start(&mut sup, &format!("/ip4/127.0.0.1/tcp/{port}"))
+        .await
+        .unwrap();
+    config.network = 99;
+    config.bootstrap_peers = vec![format!("/ip4/127.0.0.1/tcp/{port}/p2p/{receiver_id}")];
+    let sender = P2PNode::new_with_options(&config, true, None).unwrap();
+    let (sender, _) = sender
+        .start(&mut sup, &format!("/ip4/127.0.0.1/tcp/{}", free_port()))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let outcome = sender.send_direct(receiver_id, vec![1], vec![7]).await;
+        if outcome != DirectOutcome::NotConnected || tokio::time::Instant::now() > deadline {
+            assert_eq!(outcome, DirectOutcome::Unsupported);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        sender.send_direct(receiver_id, vec![1], vec![7]).await,
+        DirectOutcome::Unsupported
+    );
+    assert_eq!(sender.direct_stats().unsupported, 2);
+    assert_eq!(sender.direct_stats().delivered_payload_bytes, 0);
 }
