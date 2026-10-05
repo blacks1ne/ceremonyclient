@@ -1011,7 +1011,7 @@ pub(crate) fn init(
                                                 if super::direct_delivery::deliver_direct(&p2p, &committee_peers, &recipients, &topic, &payload).await {
                                                     return Ok(());
                                                 }
-                                                p2p.note_direct_fallback();
+                                                p2p.note_direct_fallback(payload.len());
                                             }
                                             for attempt in 1..=8u32 {
                                                 match p2p.publish(topic.clone(), payload.clone()).await {

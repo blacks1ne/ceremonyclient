@@ -32,8 +32,7 @@ pub const UNSUPPORTED_RETRY_AFTER: std::time::Duration = std::time::Duration::fr
 
 /// The direct-delivery protocol on `network`.
 pub fn direct_protocol(network: u8) -> StreamProtocol {
-    StreamProtocol::try_from_owned(format!("/quilibrium/direct/1.0.0/{network}"))
-        .expect("valid protocol name")
+    StreamProtocol::try_from_owned(format!("/quilibrium/direct/1.0.0/{network}")).expect("valid protocol name")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +68,19 @@ pub struct DirectStats {
     pub fallbacks: AtomicU64,
     pub received: AtomicU64,
     pub received_refused: AtomicU64,
+    /// Logical payload bytes, excluding framing and retransmissions. Attempts
+    /// include peers skipped before network I/O; delivered bytes require an ACK.
+    pub attempted_payload_bytes: AtomicU64,
+    pub delivered_payload_bytes: AtomicU64,
+    pub received_payload_bytes: AtomicU64,
+    pub refused_payload_bytes: AtomicU64,
+    pub fallback_payload_bytes: AtomicU64,
+    pub fallback_unmapped: AtomicU64,
+    pub fallback_recipient_limit: AtomicU64,
+    pub received_unauthorized: AtomicU64,
+    pub received_queue_full: AtomicU64,
+    pub received_queue_closed: AtomicU64,
+    pub failed_timeout: AtomicU64,
 }
 
 /// A point-in-time copy of [`DirectStats`].
@@ -82,6 +94,17 @@ pub struct DirectStatsSnapshot {
     pub fallbacks: u64,
     pub received: u64,
     pub received_refused: u64,
+    pub attempted_payload_bytes: u64,
+    pub delivered_payload_bytes: u64,
+    pub received_payload_bytes: u64,
+    pub refused_payload_bytes: u64,
+    pub fallback_payload_bytes: u64,
+    pub fallback_unmapped: u64,
+    pub fallback_recipient_limit: u64,
+    pub received_unauthorized: u64,
+    pub received_queue_full: u64,
+    pub received_queue_closed: u64,
+    pub failed_timeout: u64,
 }
 
 impl DirectStats {
@@ -107,6 +130,17 @@ impl DirectStats {
             fallbacks: get(&self.fallbacks),
             received: get(&self.received),
             received_refused: get(&self.received_refused),
+            attempted_payload_bytes: get(&self.attempted_payload_bytes),
+            delivered_payload_bytes: get(&self.delivered_payload_bytes),
+            received_payload_bytes: get(&self.received_payload_bytes),
+            refused_payload_bytes: get(&self.refused_payload_bytes),
+            fallback_payload_bytes: get(&self.fallback_payload_bytes),
+            fallback_unmapped: get(&self.fallback_unmapped),
+            fallback_recipient_limit: get(&self.fallback_recipient_limit),
+            received_unauthorized: get(&self.received_unauthorized),
+            received_queue_full: get(&self.received_queue_full),
+            received_queue_closed: get(&self.received_queue_closed),
+            failed_timeout: get(&self.failed_timeout),
         }
     }
 }
@@ -121,7 +155,10 @@ async fn read_prefixed<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> i
     io.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
     if len > max {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "direct message field too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "direct message field too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     io.read_exact(&mut buf).await?;
@@ -189,15 +226,24 @@ mod tests {
     fn requests_and_responses_round_trip_and_oversized_fields_are_refused() {
         futures::executor::block_on(async {
             let protocol = direct_protocol(0);
-            let request = DirectRequest { bitmask: vec![1, 2, 3], data: vec![9; 1000] };
+            let request = DirectRequest {
+                bitmask: vec![1, 2, 3],
+                data: vec![9; 1000],
+            };
             let mut wire = futures::io::Cursor::new(Vec::new());
-            DirectCodec.write_request(&protocol, &mut wire, request.clone()).await.unwrap();
+            DirectCodec
+                .write_request(&protocol, &mut wire, request.clone())
+                .await
+                .unwrap();
             let mut read = futures::io::Cursor::new(wire.into_inner());
             assert_eq!(DirectCodec.read_request(&protocol, &mut read).await.unwrap(), request);
 
             for accepted in [true, false] {
                 let mut wire = futures::io::Cursor::new(Vec::new());
-                DirectCodec.write_response(&protocol, &mut wire, accepted).await.unwrap();
+                DirectCodec
+                    .write_response(&protocol, &mut wire, accepted)
+                    .await
+                    .unwrap();
                 let mut read = futures::io::Cursor::new(wire.into_inner());
                 assert_eq!(DirectCodec.read_response(&protocol, &mut read).await.unwrap(), accepted);
             }
@@ -205,10 +251,21 @@ mod tests {
             let mut forged = (u32::MAX).to_be_bytes().to_vec();
             forged.extend_from_slice(&[0; 8]);
             let mut read = futures::io::Cursor::new(forged);
-            assert!(DirectCodec.read_request(&protocol, &mut read).await.is_err(), "a huge length is refused before allocating");
-            let oversized = DirectRequest { bitmask: vec![0; MAX_DIRECT_BITMASK + 1], data: Vec::new() };
+            assert!(
+                DirectCodec.read_request(&protocol, &mut read).await.is_err(),
+                "a huge length is refused before allocating"
+            );
+            let oversized = DirectRequest {
+                bitmask: vec![0; MAX_DIRECT_BITMASK + 1],
+                data: Vec::new(),
+            };
             let mut wire = futures::io::Cursor::new(Vec::new());
-            assert!(DirectCodec.write_request(&protocol, &mut wire, oversized).await.is_err());
+            assert!(
+                DirectCodec
+                    .write_request(&protocol, &mut wire, oversized)
+                    .await
+                    .is_err()
+            );
         });
     }
 

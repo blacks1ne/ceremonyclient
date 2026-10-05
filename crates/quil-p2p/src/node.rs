@@ -932,15 +932,30 @@ impl P2PNode {
                                         Event::Message { peer, message: Message::Request { request, channel, .. }, .. } => {
                                             // Delivered as a gossip message on its bitmask would
                                             // be, from the authenticated connection's peer.
-                                            let accepted = direct_allowed.contains(&request.bitmask)
-                                                && msg_tx.try_send(ReceivedMessage {
+                                            let payload_bytes = request.data.len() as u64;
+                                            let allowed = direct_allowed.contains(&request.bitmask);
+                                            let accepted = if allowed {
+                                                match msg_tx.try_send(ReceivedMessage {
                                                     bitmask: request.bitmask,
                                                     data: request.data,
                                                     from: peer.to_bytes(),
                                                     direct: true,
-                                                }).is_ok();
+                                                }) {
+                                                    Ok(()) => true,
+                                                    Err(error) => {
+                                                        let reason = if matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_)) { &direct_stats.received_queue_full } else { &direct_stats.received_queue_closed };
+                                                        reason.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        false
+                                                    }
+                                                }
+                                            } else {
+                                                direct_stats.received_unauthorized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                false
+                                            };
                                             let counter = if accepted { &direct_stats.received } else { &direct_stats.received_refused };
                                             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            let bytes = if accepted { &direct_stats.received_payload_bytes } else { &direct_stats.refused_payload_bytes };
+                                            bytes.fetch_add(payload_bytes, std::sync::atomic::Ordering::Relaxed);
                                             let _ = swarm.behaviour_mut().direct.send_response(channel, accepted);
                                         }
                                         Event::Message { message: Message::Response { request_id, response }, .. } => {
@@ -957,6 +972,10 @@ impl P2PNode {
                                                     DirectOutcome::Unsupported
                                                 }
                                                 OutboundFailure::DialFailure => DirectOutcome::NotConnected,
+                                                OutboundFailure::Timeout => {
+                                                    direct_stats.failed_timeout.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    DirectOutcome::Failed
+                                                }
                                                 other => {
                                                     debug!(%peer, error = %other, "direct send failed");
                                                     DirectOutcome::Failed
@@ -1488,11 +1507,17 @@ impl P2PHandle {
         bitmask: Vec<u8>,
         data: Vec<u8>,
     ) -> crate::direct::DirectOutcome {
+        let payload_bytes = data.len() as u64;
+        self.direct_stats.attempted_payload_bytes.fetch_add(payload_bytes, std::sync::atomic::Ordering::Relaxed);
         let (ack, outcome) = oneshot::channel();
         if self.cmd_tx.send(P2PCommand::SendDirect { peer, bitmask, data, ack }).await.is_err() {
             return crate::direct::DirectOutcome::Failed;
         }
-        outcome.await.unwrap_or(crate::direct::DirectOutcome::Failed)
+        let outcome = outcome.await.unwrap_or(crate::direct::DirectOutcome::Failed);
+        if outcome == crate::direct::DirectOutcome::Delivered {
+            self.direct_stats.delivered_payload_bytes.fetch_add(payload_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+        outcome
     }
 
     /// Accept direct messages on `bitmask` (delivered like its gossip).
@@ -1506,8 +1531,15 @@ impl P2PHandle {
     }
 
     /// Record that a send went over gossip after its direct attempt.
-    pub fn note_direct_fallback(&self) {
+    pub fn note_direct_fallback(&self, payload_bytes: usize) {
         self.direct_stats.fallbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.direct_stats.fallback_payload_bytes.fetch_add(payload_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record a routing rejection before any direct network attempt.
+    pub fn note_direct_preflight_failure(&self, unmapped: bool) {
+        let counter = if unmapped { &self.direct_stats.fallback_unmapped } else { &self.direct_stats.fallback_recipient_limit };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn direct_stats(&self) -> crate::direct::DirectStatsSnapshot {

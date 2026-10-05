@@ -1120,7 +1120,7 @@ pub(crate) fn spawn_all(
                     super::direct_delivery::deliver_direct(&p2p, &peers, &recipients, &topic, &payload).await;
                 if !delivered {
                     // The worker sends it to the topic itself.
-                    p2p.note_direct_fallback();
+                    p2p.note_direct_fallback(payload.len());
                 }
                 delivered
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
