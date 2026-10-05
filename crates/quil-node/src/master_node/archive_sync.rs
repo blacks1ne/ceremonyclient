@@ -3347,7 +3347,12 @@ pub(crate) fn spawn_all(sup: &mut Supervisor<anyhow::Error>, args: ArchiveSyncAr
                                     sync_cs
                                         .get_latest_global_frame()
                                         .ok()
-                                        .and_then(|f| f.header.map(|h| h.prover_tree_commitment))
+                                        .and_then(|f| f.header.map(|h| {
+                                            info!(registry_sync, frame = h.frame_number,
+                                                root = hex::encode(&h.prover_tree_commitment),
+                                                "prover registry reconcile pinned snapshot");
+                                            h.prover_tree_commitment
+                                        }))
                                 })
                                 .unwrap_or_default();
                             let reconcile_peers = sync_pool.get_all().await;
@@ -3372,7 +3377,7 @@ pub(crate) fn spawn_all(sup: &mut Supervisor<anyhow::Error>, args: ArchiveSyncAr
                                             debug!(peer = %addr, "reconcile: peer not on finalized lineage — trying next");
                                             continue;
                                         }
-                                        info!(peer = %addr, match_ok = conv.is_some(), "incremental prover tree sync complete");
+                                        info!(peer = %addr, match_ok = conv.is_some(), registry_sync, expected_root = hex::encode(&expected_root), "incremental prover tree sync complete");
                                         // Refresh registry with updated data.
                                         let pr = sync_pr.clone();
                                         let hs3 = sync_hg.clone();
