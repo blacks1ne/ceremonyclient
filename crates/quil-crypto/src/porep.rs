@@ -481,6 +481,71 @@ where
     Ok(())
 }
 
+/// Read only the challenged block and its cached commitment groups. Implementors
+/// must keep one immutable replica generation for the lifetime of a read.
+pub trait StorageOpeningReader {
+    fn replica_len(&self) -> u64;
+    fn root(&self) -> &[u8];
+    fn block(&self, index: u64) -> quil_types::error::Result<Vec<u8>>;
+    fn group(&self, level: u32, index: u64) -> quil_types::error::Result<Vec<Vec<u8>>>;
+}
+
+/// Build the same proof as `build_storage_opening`, without reading or
+/// recommitting the entire replica. Check each cached commitment on the selected
+/// path against its data before using it; missing or stale cache data fails closed.
+#[allow(clippy::too_many_arguments)]
+pub fn build_storage_opening_from_reader(
+    reader: &impl StorageOpeningReader,
+    leaf_id: &[u8],
+    epoch: u64,
+    member_id: &[u8],
+    query: u32,
+    rho_n: &[u8],
+    poly_size: u64,
+) -> quil_types::error::Result<StorageOpening> {
+    use quil_types::error::QuilError;
+    let invalid = || QuilError::InvalidArgument("invalid prepared replica path".into());
+    if !(2..=256).contains(&poly_size) || !poly_size.is_power_of_two() {
+        return Err(invalid());
+    }
+    let block_bytes = poly_size * 32;
+    let num_blocks = reader.replica_len().div_ceil(block_bytes).max(1);
+    let block = derive_block_index(rho_n, leaf_id, epoch, member_id, query, num_blocks);
+    let point = derive_challenge_index(rho_n, leaf_id, epoch, member_id, query, poly_size);
+    let data = reader.block(block)?;
+    let expected_len = reader.replica_len().saturating_sub(block * block_bytes).min(block_bytes);
+    if data.len() as u64 != expected_len { return Err(invalid()); }
+    let full = crate::sdr::pack_block(&data, poly_size);
+    let commitment = bls48581::commit_raw_full(&full, poly_size);
+    let proof = bls48581::prove_raw_full(&full, point, poly_size);
+    let value = full[point as usize * 73..point as usize * 73 + 73].to_vec();
+    let mut current = commitment.clone();
+    let mut idx = block;
+    let mut count = num_blocks;
+    let mut level = 0;
+    let mut path_commits = Vec::new();
+    let mut path_proofs = Vec::new();
+    while count > 1 {
+        let group_idx = idx / poly_size;
+        let group = reader.group(level, group_idx)?;
+        let group_len = (count - group_idx * poly_size).min(poly_size) as usize;
+        if group.len() != group_len || group.iter().any(|c| c.len() != 74)
+            || group[idx as usize % poly_size as usize] != current {
+            return Err(invalid());
+        }
+        let full = crate::sdr::node_poly(&group, poly_size);
+        current = bls48581::commit_raw_full(&full, poly_size);
+        path_proofs.push(bls48581::prove_raw_full(&full, idx % poly_size, poly_size));
+        path_commits.push(current.clone());
+        idx = group_idx;
+        count = count.div_ceil(poly_size);
+        level += 1;
+    }
+    if current != reader.root() { return Err(invalid()); }
+    Ok(StorageOpening { shard_id: leaf_id.to_vec(), epoch, member_id: member_id.to_vec(), query,
+        leaf_root: current, num_blocks, path_commits, path_proofs, commitment, value, proof })
+}
+
 /// Producer counterpart to the verifier: open one member's challenged leaf for
 /// one query, given its stored `replica` and the leaf's [`sdr::LeafCommitment`].
 /// Derives the `(block, point)` challenge from `rho_n` (so the prover has no

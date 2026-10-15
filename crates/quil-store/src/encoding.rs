@@ -24,6 +24,9 @@ pub const CONSENSUS: u8 = 0x0C;
 /// `[STORAGE_REPLICA][epoch:u64 BE][leaf_id]` (epoch-first so dropping a stale
 /// epoch is a single `delete_range`). Rust-only (no Go counterpart).
 pub const STORAGE_REPLICA: u8 = 0x0D;
+/// Versioned, chunked storage replicas and their reusable commitment groups.
+/// Epoch-first, independently evicted with the corresponding legacy replicas.
+pub const STORAGE_REPLICA_PREPARED: u8 = 0x0E;
 /// Sub-discriminators under CONSENSUS — match Go's
 /// `node/store/constants.go:178-179`. The Rust consensus store
 /// historically wrote these at top-level prefixes 0x01/0x02 which

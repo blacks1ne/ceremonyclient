@@ -339,9 +339,9 @@ pub(crate) fn has_committed_shard_data(crdt: &HypergraphCrdt, filter: &[u8]) -> 
 /// the per-shard [`ConfirmLeafRoots`] to fold into the ProverConfirm via
 /// [`crate::provers::actions::build_confirm_bundle_with_leaf_roots`].
 ///
-/// Reads committed CRDT state — call at a commit boundary. Leaf data is fetched
-/// fallibly up front (so a store error aborts rather than silently encoding an
-/// empty leaf), then encoded through the pure `compute_confirm_leaf_roots`.
+/// Reads committed CRDT state — call at a commit boundary. Fetch and encode one
+/// leaf at a time. A store error aborts registration rather than silently
+/// encoding an empty leaf; completed local replicas can be retired by epoch.
 pub fn compute_storage_confirm(
     crdt: &HypergraphCrdt,
     replica_store: &quil_store::replica_store::ReplicaStore,
@@ -381,23 +381,26 @@ pub fn compute_storage_confirm(
             continue;
         }
 
-        // Fetch every leaf's canonical data up front (fallible), then encode
-        // through the pure oracle (a map lookup) so errors propagate.
-        let mut data_map: std::collections::HashMap<Vec<u32>, Vec<u8>> =
-            std::collections::HashMap::with_capacity(prefixes.len());
-        for p in &prefixes {
-            data_map.insert(p.clone(), leaf_data_for(crdt, filter, &typed, p)?);
-        }
-        let oracle = |p: &[u32]| -> Vec<u8> { data_map.get(p).cloned().unwrap_or_default() };
-
-        let (groups, replicas) = compute_confirm_leaf_roots(
-            filter, member, epoch, &prefixes, block_poly_size, params, &oracle,
-        );
-        for (prefix, replica) in &replicas {
+        // Bound peak memory to one leaf. Keep the commitment already computed
+        // while sealing, so future frames read only their challenged blocks.
+        // If a later leaf fails, no registration is returned; completed local
+        // replicas remain unregistered and are covered by normal epoch eviction.
+        let mut entries = Vec::with_capacity(prefixes.len());
+        for prefix in &prefixes {
+            let data = leaf_data_for(crdt, filter, &typed, prefix)?;
             let lid = leaf_id_bytes(filter, prefix);
-            replica_store.put(epoch, &lid, replica)?;
+            let (replica, leaf) = quil_crypto::sdr::build_leaf_replica(
+                &data, member, &lid, epoch, block_poly_size, params,
+            );
+            replica_store.put_prepared(epoch, &lid, &replica, &leaf)?;
+            entries.push(quil_execution::global_intrinsic::leaf_root_registration::LeafRootEntry {
+                prefix: prefix.clone(), leaf_root: leaf.root.clone(),
+                num_blocks: leaf.block_commitments().len() as u64,
+            });
         }
-        all.push(groups);
+        all.push(quil_execution::global_intrinsic::leaf_root_registration::ConfirmLeafRoots {
+            filter: filter.clone(), entries,
+        });
     }
     Ok(all)
 }
@@ -430,6 +433,17 @@ pub fn build_member_frame_openings(
     for (filter, prefixes) in covered {
         for prefix in prefixes {
             let lid = leaf_id_bytes(filter, prefix);
+            if let Some(prepared) = replica_store.prepared(epoch, &lid)? {
+                if prepared.poly_size() != poly_size {
+                    return Err(quil_types::error::QuilError::InvalidArgument("prepared replica polynomial size differs".into()));
+                }
+                for q in 0..queries {
+                    openings.push(quil_crypto::porep::build_storage_opening_from_reader(
+                        &prepared, &lid, epoch, member, q, rho_n, poly_size,
+                    )?);
+                }
+                continue;
+            }
             let Some(replica) = replica_store.get(epoch, &lid)? else {
                 continue;
             };
@@ -1026,12 +1040,23 @@ mod tests {
             !roots[0].entries.is_empty(),
             "a shard with committed data must register at least one leaf root"
         );
+        let prefixes: Vec<_> = roots[0].entries.iter().map(|entry| entry.prefix.clone()).collect();
+        let typed = ShardKey { l1: quil_hypergraph::addressing::get_bloom_filter_indices(&filter, 256, 3), l2: [app; 32] };
+        let oracle = |prefix: &[u32]| leaf_data_for(&crdt, &filter, &typed, prefix).unwrap();
+        let (reference, _) = compute_confirm_leaf_roots(&filter, &member, epoch, &prefixes, poly_size, &params, &oracle);
+        assert_eq!(roots[0].entries.len(), reference.entries.len());
+        for (actual, expected) in roots[0].entries.iter().zip(reference.entries) {
+            assert_eq!(actual.prefix, expected.prefix);
+            assert_eq!(actual.leaf_root, expected.leaf_root);
+            assert_eq!(actual.num_blocks, expected.num_blocks);
+        }
 
         // Every registered leaf's replica was persisted under (epoch, leaf_id)
         // and its commitment matches the registered root — the producer can
         // later answer openings from exactly these bytes.
         for e in &roots[0].entries {
             let lid = leaf_id_bytes(&filter, &e.prefix);
+            assert!(replica_store.prepared(epoch, &lid).unwrap().is_some());
             let replica = replica_store
                 .get(epoch, &lid)
                 .unwrap()

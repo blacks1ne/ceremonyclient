@@ -16,6 +16,10 @@ use quil_types::store::KvDb;
 
 use crate::encoding::STORAGE_REPLICA;
 
+#[path = "prepared_replica.rs"]
+mod prepared;
+pub use prepared::PreparedReplica;
+
 /// Key: `[STORAGE_REPLICA][epoch:u64 BE][leaf_id]`.
 fn replica_key(epoch: u64, leaf_id: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(1 + 8 + leaf_id.len());
@@ -49,17 +53,26 @@ impl ReplicaStore {
 
     /// Persist `replica` for `(epoch, leaf_id)`, replacing any prior value.
     pub fn put(&self, epoch: u64, leaf_id: &[u8], replica: &[u8]) -> Result<()> {
-        self.db.set(&replica_key(epoch, leaf_id), replica)
+        let batch = self.db.new_batch(false)?;
+        self.clear_prepared(batch.as_ref(), epoch, leaf_id)?;
+        batch.set(&replica_key(epoch, leaf_id), replica)?;
+        batch.commit()
     }
 
     /// Fetch the replica for `(epoch, leaf_id)`, or `None`.
     pub fn get(&self, epoch: u64, leaf_id: &[u8]) -> Result<Option<Vec<u8>>> {
+        if let Some(prepared) = self.prepared(epoch, leaf_id)? {
+            return prepared.read_all().map(Some);
+        }
         self.db.get(&replica_key(epoch, leaf_id))
     }
 
     /// Remove one replica.
     pub fn delete(&self, epoch: u64, leaf_id: &[u8]) -> Result<()> {
-        self.db.delete(&replica_key(epoch, leaf_id))
+        let batch = self.db.new_batch(false)?;
+        self.clear_prepared(batch.as_ref(), epoch, leaf_id)?;
+        batch.delete(&replica_key(epoch, leaf_id))?;
+        batch.commit()
     }
 
     /// Drop every replica for an epoch strictly below `keep_from` — called
@@ -72,7 +85,12 @@ impl ReplicaStore {
         hi.push(STORAGE_REPLICA);
         hi.extend_from_slice(&keep_from.to_be_bytes());
         // delete_range is [lo, hi): epochs 0..keep_from.
-        self.db.delete_range(&lo, &hi)
+        let batch = self.db.new_batch(false)?;
+        batch.delete_range(&lo, &hi)?;
+        lo[0] = crate::encoding::STORAGE_REPLICA_PREPARED;
+        hi[0] = crate::encoding::STORAGE_REPLICA_PREPARED;
+        batch.delete_range(&lo, &hi)?;
+        batch.commit()
     }
 
     /// Iterate `(leaf_id, replica)` for every leaf stored under `epoch`. Used by
@@ -95,6 +113,7 @@ impl ReplicaStore {
             ok = iter.next();
         }
         iter.close()?;
+        self.for_each_prepared_in_epoch(epoch, &mut f)?;
         Ok(())
     }
 }

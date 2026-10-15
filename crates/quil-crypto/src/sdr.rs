@@ -226,7 +226,7 @@ pub fn pack_block(chunk: &[u8], block_poly_size: u64) -> Vec<u8> {
 /// Build one internal node's full-width KZG polynomial: its `poly_size` leaves
 /// are the field-reduced commitments of (up to) `poly_size` children, the rest
 /// zero-padded. Shared by commit + path so they pack identically.
-fn node_poly(children: &[Vec<u8>], poly_size: u64) -> Vec<u8> {
+pub(crate) fn node_poly(children: &[Vec<u8>], poly_size: u64) -> Vec<u8> {
     let mut chunk = Vec::with_capacity(children.len() * 32);
     for c in children {
         chunk.extend_from_slice(&commit_to_scalar(c));
