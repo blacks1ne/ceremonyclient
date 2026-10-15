@@ -1,7 +1,7 @@
 //! Immutable replica chunks and commitment groups. Publish the small manifest
 //! last; interrupted staging is unreachable and removed by epoch eviction.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use quil_crypto::{porep::StorageOpeningReader, sdr::LeafCommitment};
 use quil_types::{error::{QuilError, Result}, store::{KvDb, Transaction}};
@@ -116,10 +116,19 @@ impl StorageOpeningReader for PreparedReplica {
 }
 
 impl ReplicaStore {
+    // Serialize publication/retirement even across independently constructed
+    // handles to one backing database. Sealing and all reads stay concurrent;
+    // this lock covers only persistent staging and its atomic publication.
+    pub(super) fn writer() -> &'static Mutex<()> {
+        static WRITER: Mutex<()> = Mutex::new(());
+        &WRITER
+    }
+
     /// Persist the already computed commitment with bounded replica chunks.
     /// A publication atomically replaces the legacy value. Older binaries see
     /// this replica as absent, rather than interpreting a new format as bytes.
     pub fn put_prepared(&self, epoch: u64, id: &[u8], replica: &[u8], leaf: &LeafCommitment) -> Result<()> {
+        let _guard = Self::writer().lock().map_err(|_| invalid())?;
         let poly = leaf.poly_size;
         if !(2..=256).contains(&poly) || !poly.is_power_of_two() || replica.len() as u64 > MAX_BYTES
             || leaf.root.len() != COMMIT_BYTES { return Err(invalid()); }
@@ -142,14 +151,26 @@ impl ReplicaStore {
         prefix.extend_from_slice(&generation);
         let prepared = PreparedReplica { db: self.db.clone(), prefix, len: replica.len() as u64,
             poly, root: leaf.root.clone() };
-        let width = (poly * 32 * BLOCKS_PER_CHUNK) as usize;
-        for (index, chunk) in replica.chunks(width).enumerate() {
-            put_checked(self.db.as_ref(), &prepared.key(0, 0, index as u64), chunk)?;
-        }
-        for (level, commits) in leaf.levels.iter().enumerate() {
-            for (index, group) in commits.chunks(poly as usize).enumerate() {
-                put_checked(self.db.as_ref(), &prepared.key(1, level as u32, index as u64), &group.concat())?;
+        let previous = self.prepared(epoch, id)?;
+        let stage = (|| -> Result<()> {
+            let width = (poly * 32 * BLOCKS_PER_CHUNK) as usize;
+            for (index, chunk) in replica.chunks(width).enumerate() {
+                put_checked(self.db.as_ref(), &prepared.key(0, 0, index as u64), chunk)?;
             }
+            for (level, commits) in leaf.levels.iter().enumerate() {
+                for (index, group) in commits.chunks(poly as usize).enumerate() {
+                    put_checked(self.db.as_ref(), &prepared.key(1, level as u32, index as u64), &group.concat())?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = stage {
+            // Never erase the currently published generation on a failed
+            // same-generation repair. Other incomplete staging is disposable.
+            if previous.as_ref().is_none_or(|old| old.prefix != prepared.prefix) {
+                self.db.delete_range(&prepared.prefix, &upper(prepared.prefix.clone()))?;
+            }
+            return Err(error);
         }
         let mut manifest = MAGIC.to_vec();
         manifest.extend_from_slice(&poly.to_be_bytes());
@@ -159,6 +180,11 @@ impl ReplicaStore {
         let batch = self.db.new_batch(false)?;
         batch.set(&leaf_prefix(epoch, 0, id)?, &manifest)?;
         batch.delete(&super::replica_key(epoch, id))?;
+        let data_prefix = leaf_prefix(epoch, 1, id)?;
+        batch.delete_range(&data_prefix, &prepared.prefix)?;
+        let after = upper(prepared.prefix.clone());
+        let end = upper(data_prefix);
+        if after < end { batch.delete_range(&after, &end)?; }
         batch.commit()
     }
 
@@ -331,5 +357,20 @@ mod tests {
         assert!(store.get(2, b"leaf").unwrap().is_none());
         db.inner.set(&leaf_prefix(2, 0, b"leaf").unwrap(), MAGIC).unwrap();
         assert!(store.prepared(2, b"leaf").is_err());
+    }
+
+    #[test]
+    fn publication_retires_superseded_generations_without_mixing_readers() {
+        let (store, _) = fixture();
+        let old = vec![1; 4096]; let new = vec![2; 4096];
+        let leaf = quil_crypto::sdr::commit_leaf(&old, 64);
+        store.put_prepared(3, b"leaf", &old, &leaf).unwrap();
+        let old_reader = store.prepared(3, b"leaf").unwrap().unwrap();
+        let leaf = quil_crypto::sdr::commit_leaf(&new, 64);
+        store.put_prepared(3, b"leaf", &new, &leaf).unwrap();
+        assert_eq!(store.get(3, b"leaf").unwrap(), Some(new));
+        assert!(old_reader.block(0).is_err(), "an old reader must not mix in the new generation");
+        assert!(old_reader.db.get(&old_reader.key(1, 0, 0)).unwrap().is_none(),
+            "superseded commitment data must be retired at publication");
     }
 }

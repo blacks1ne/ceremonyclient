@@ -53,6 +53,7 @@ impl ReplicaStore {
 
     /// Persist `replica` for `(epoch, leaf_id)`, replacing any prior value.
     pub fn put(&self, epoch: u64, leaf_id: &[u8], replica: &[u8]) -> Result<()> {
+        let _guard = Self::writer().lock().map_err(|_| quil_types::error::QuilError::Store("replica write lock poisoned".into()))?;
         let batch = self.db.new_batch(false)?;
         self.clear_prepared(batch.as_ref(), epoch, leaf_id)?;
         batch.set(&replica_key(epoch, leaf_id), replica)?;
@@ -69,6 +70,7 @@ impl ReplicaStore {
 
     /// Remove one replica.
     pub fn delete(&self, epoch: u64, leaf_id: &[u8]) -> Result<()> {
+        let _guard = Self::writer().lock().map_err(|_| quil_types::error::QuilError::Store("replica write lock poisoned".into()))?;
         let batch = self.db.new_batch(false)?;
         self.clear_prepared(batch.as_ref(), epoch, leaf_id)?;
         batch.delete(&replica_key(epoch, leaf_id))?;
@@ -78,6 +80,7 @@ impl ReplicaStore {
     /// Drop every replica for an epoch strictly below `keep_from` — called
     /// after re-encoding for a new epoch so stale replicas don't accumulate.
     pub fn evict_below_epoch(&self, keep_from: u64) -> Result<()> {
+        let _guard = Self::writer().lock().map_err(|_| quil_types::error::QuilError::Store("replica write lock poisoned".into()))?;
         let mut lo = Vec::with_capacity(9);
         lo.push(STORAGE_REPLICA);
         lo.extend_from_slice(&0u64.to_be_bytes());
