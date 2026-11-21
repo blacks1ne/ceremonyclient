@@ -32,8 +32,8 @@ health conditions \
 (kind, severity, scope, start, counts, the shard filters, frames and worker cores affected, \
 a slow store fsync time, the GLOBAL frames an expected wait ends at, and for GLOBAL's progress \
 its head, its recent frame rate and how many GLOBAL provers this node hears); and per worker \
-its core ID, public shard filter, allocation, phase, blocker, frames, committee generation, \
-recovery state and failure counts, and when these last changed.\n\
+its core ID, build (release and source commit), public shard filter, allocation, phase, blocker, \
+frames, committee generation, recovery state and failure counts, and when these last changed.\n\
 It gets no log text, addresses or keys, and no condition about this node's rewards or \
 addresses.\n";
 
@@ -448,6 +448,8 @@ mod tests {
             activation_frame: _,
             awaited_frame: _,
             draining: _,
+            build: _,
+            build_is_node: _,
         } = WorkerHealth::default();
         let HealthCondition {
             kind: _,
