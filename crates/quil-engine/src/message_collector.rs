@@ -15,6 +15,9 @@ use crate::proposal_pool::Intake;
 use quil_execution::manager::ShieldClaim;
 use quil_types::execution::{SeatPartChange, SeatPartKind};
 
+mod capacity_wait;
+#[cfg(test)]
+mod capacity_wait_tests;
 mod cert_union;
 #[cfg(test)]
 mod held_seal_tests;
@@ -907,16 +910,27 @@ const CAPACITY_MESSAGES_PER_MEMBER: usize = 64;
 const CAPACITY_BYTES_PER_MEMBER: usize = 4 << 20;
 
 /// What one proposal copies of capacity messages, after every other message
-/// and storage epoch proof: about two certificates and their precommits. A
+/// and storage epoch proof, those a proposal of this node left out before
+/// ahead of them: about two certificates and their precommits. A
 /// certificate costs a leader a STARK verification and a precommit a BLS one,
 /// within the validation budget every other message shares (2026-11-08: a
 /// leader validated 220 and deferred 843).
 const CAPACITY_MESSAGES_PER_PROPOSAL: usize = 256;
 const CAPACITY_BYTES_PER_PROPOSAL: usize = 2 << 20;
 
+/// Frames past which a GLOBAL proposal's budget line warns that a capacity
+/// message it left out has waited since a proposal of this node first left
+/// it: a sixth of a mainnet epoch (720 frames). Those left before go first,
+/// up to [`CAPACITY_BYTES_PER_PROPOSAL`] (about two certificates) a
+/// proposal, so a wait this long means over about 240 certificates waited
+/// longer, or proposals take none.
+const CAPACITY_WAIT_WARN_FRAMES: u64 = 120;
+
 /// Bytes of storage epoch proofs a GLOBAL proposal takes ahead of shard
 /// proofs beyond their floor, other messages left waiting and capacity
-/// messages ([`MessageCollector::snapshot_for_proposal`]); past it a proof
+/// messages, except those a proposal of this node left out before: they
+/// take up to [`CAPACITY_BYTES_PER_PROPOSAL`] of it first
+/// ([`MessageCollector::snapshot_for_proposal`]); past it a proof
 /// rides only in the room every other message leaves. Twice
 /// `STORAGE_SEAL_BYTES_PER_FRAME`, which stays the bound on one proof: at
 /// 4 MiB a frame, one epoch boundary's settlements took 10-25 minutes to
@@ -2484,6 +2498,10 @@ pub struct MessageCollector {
     /// bundle, is a duplicate: GLOBAL credits a shard frame per frame that
     /// carries it, so carrying it again would credit it again.
     included_frames: std::sync::Mutex<HashMap<Vec<u8>, BTreeSet<u64>>>,
+    /// How long each capacity message has waited for a GLOBAL proposal of
+    /// this node ([`capacity_wait`]). Locked after `buffers` and `finalized`
+    /// when they are.
+    capacity_waits: std::sync::Mutex<capacity_wait::CapacityWaits>,
     /// Set while submits are refused for a full rank buffer, so an accepted
     /// submit takes `rank_full` only to end the stretch.
     rank_full_active: std::sync::atomic::AtomicBool,
@@ -3324,6 +3342,7 @@ impl MessageCollector {
             included: std::sync::Mutex::new(HashMap::new()),
             finalizations: std::sync::atomic::AtomicU64::new(0),
             included_frames: std::sync::Mutex::new(HashMap::new()),
+            capacity_waits: std::sync::Mutex::new(Default::default()),
             rank_full_active: std::sync::atomic::AtomicBool::new(false),
             rank_full: std::sync::Mutex::new(RankFullLog::new()),
             class_shares: std::sync::atomic::AtomicBool::new(false),
@@ -4388,6 +4407,10 @@ impl MessageCollector {
     /// message leaves; of those due together, each member's first
     /// that may ride ahead first, by its seats per byte
     /// ([`CollectedMessage::density_member`]), then the rest oldest first.
+    /// Capacity messages go after all of them, up to their share
+    /// ([`CAPACITY_BYTES_PER_PROPOSAL`]), except those a proposal of this
+    /// node left out before, which go ahead of the other messages, longest
+    /// waiting first, within that share ([`capacity_wait`]).
     /// Shard proofs go a shard at a time, the
     /// shards whose proofs rode a finalized frame longest ago first and those
     /// `consumed` by an executed ancestor last, each with the candidates its
@@ -4639,6 +4662,46 @@ impl MessageCollector {
             }
         };
         let mut seal_bytes = 0usize;
+        // Capacity messages a proposal of this node left out before go
+        // first, longest waiting first, up to their share of a proposal
+        // ([`CAPACITY_MESSAGES_PER_PROPOSAL`], [`CAPACITY_BYTES_PER_PROPOSAL`]);
+        // the rest go last. Taken only last, behind storage epoch proofs that
+        // filled the seal budget in 970 of 980 proposals, no capacity
+        // certificate rode GLOBAL frames 1123400-1123919 (2026-11-24); the
+        // share keeps them from crowding out members' proofs (2026-11-08).
+        let capacity_keys: Vec<[u8; 32]> = capacity.iter().map(|c| c.2.hash).collect();
+        let (mut waited, mut capacity_last): (Vec<(u64, Candidate)>, Vec<Candidate>) =
+            (Vec::new(), Vec::new());
+        match frame {
+            Some(frame) => {
+                let waits = self.capacity_waits.lock().map_err(|_| unavailable())?;
+                for candidate in capacity {
+                    match waits.since(&candidate.2.hash, frame) {
+                        Some(since) => waited.push((since, candidate)),
+                        None => capacity_last.push(candidate),
+                    }
+                }
+            }
+            None => capacity_last = capacity,
+        }
+        waited.sort_unstable_by_key(|(since, c)| (*since, c.0, c.1));
+        let (mut capacity_taken, mut capacity_bytes) = (0usize, 0usize);
+        let mut capacity_tail: Vec<(Option<u64>, Candidate)> = Vec::new();
+        for (since, candidate) in waited {
+            let len = candidate.2.data.len();
+            if capacity_taken < CAPACITY_MESSAGES_PER_PROPOSAL
+                && capacity_bytes + len <= CAPACITY_BYTES_PER_PROPOSAL
+                && seal_bytes + len <= seal_budget
+                && copied.take(vec![candidate], others_cap)
+            {
+                capacity_taken += 1;
+                capacity_bytes += len;
+                seal_bytes += len;
+            } else {
+                capacity_tail.push((Some(since), candidate));
+            }
+        }
+        capacity_tail.extend(capacity_last.into_iter().map(|c| (None, c)));
         let mut beyond = Vec::new();
         // The held storage epoch proofs a proposal of a frame leaves, the
         // rank of the copy it read, and why ([`Passed`]).
@@ -4669,7 +4732,7 @@ impl MessageCollector {
                 proofs_left += 1;
             }
         }
-        let mut others_left = 0usize;
+        let (mut others_left, mut seals_left) = (0usize, 0usize);
         for (order, candidate) in waiting {
             let len = seal_len(&candidate);
             if seal_bytes + len > seal_budget {
@@ -4678,22 +4741,29 @@ impl MessageCollector {
                 seal_bytes += len;
             } else {
                 others_left += 1;
+                seals_left += usize::from(len > 0);
                 pass(&candidate, Skip::ProposalFull);
             }
         }
-        // Capacity messages go last, behind every storage epoch proof in the
-        // seal budget, and only up to their share: until 2026-11-08 five
-        // capacity certificates filled the seal budget ahead of members'
-        // storage epoch proofs.
-        let (mut capacity_taken, mut capacity_bytes, mut capacity_left) = (0usize, 0usize, 0usize);
-        for candidate in capacity {
+        // The other capacity messages go last, behind every storage epoch
+        // proof in the seal budget, and only up to their share: until
+        // 2026-11-08 five capacity certificates filled the seal budget ahead
+        // of members' storage epoch proofs.
+        let mut capacity_left = Vec::new();
+        let mut capacity_waited_left = 0usize;
+        let mut capacity_wait_frames = 0u64;
+        for (since, candidate) in capacity_tail {
             let len = candidate.2.data.len();
             if capacity_taken >= CAPACITY_MESSAGES_PER_PROPOSAL
                 || capacity_bytes + len > CAPACITY_BYTES_PER_PROPOSAL
                 || seal_bytes + len > seal_budget
                 || !copied.take(vec![candidate], max_bytes)
             {
-                capacity_left += 1;
+                capacity_left.push(candidate.2.hash);
+                if let (Some(frame), Some(since)) = (frame, since) {
+                    capacity_waited_left += 1;
+                    capacity_wait_frames = capacity_wait_frames.max(frame - since);
+                }
             } else {
                 capacity_taken += 1;
                 capacity_bytes += len;
@@ -4709,26 +4779,66 @@ impl MessageCollector {
                 seals_beyond += 1;
             } else {
                 others_left += 1;
+                seals_left += 1;
                 pass(&candidate, Skip::SealBudget);
             }
         }
+        if let Some(frame) = frame {
+            let gone = |key: &[u8; 32]| finalized.contains(key) || consumed_keys.contains(key);
+            self.capacity_waits.lock().map_err(|_| unavailable())?.note(
+                frame,
+                &capacity_keys,
+                &capacity_left,
+                gone,
+                quil_types::consensus::epoch_length_frames(),
+            );
+        }
+        let capacity_left = capacity_left.len();
         if proofs_left + others_left + capacity_left > 0 {
+            let left_out = [
+                (proofs_left, "shard_proofs"),
+                (seals_left, "storage_epoch_proofs"),
+                (others_left - seals_left, "other_messages"),
+                (capacity_left, "capacity_messages"),
+            ]
+            .iter()
+            .filter(|(left, _)| *left > 0)
+            .map(|(_, class)| *class)
+            .collect::<Vec<_>>()
+            .join(",");
+            macro_rules! global_budget_line {
+                ($level:ident, $text:literal) => {
+                    tracing::$level!(
+                        rank,
+                        frame = frame.unwrap_or_default(),
+                        left_out = left_out.as_str(),
+                        shards = proofs,
+                        shards_left = proofs_left,
+                        others_left,
+                        seals_left,
+                        capacity_taken,
+                        capacity_left,
+                        capacity_waiting = capacity_waited_left,
+                        capacity_wait_frames,
+                        capacity_wait_bound = CAPACITY_WAIT_WARN_FRAMES,
+                        seal_bytes,
+                        seal_share = seal_budget,
+                        seals_beyond,
+                        bytes = copied.bytes,
+                        max_bytes,
+                        max_items,
+                        $text,
+                    )
+                };
+            }
             match frame {
-                Some(frame) => tracing::info!(
-                    rank,
-                    frame,
-                    shards = proofs,
-                    shards_left = proofs_left,
-                    others_left,
-                    capacity_taken,
-                    capacity_left,
-                    seal_bytes,
-                    seal_share = seal_budget,
-                    seals_beyond,
-                    bytes = copied.bytes,
-                    max_bytes,
-                    max_items,
-                    "GLOBAL proposal budget full: messages left for a later frame",
+                Some(_) if capacity_wait_frames > CAPACITY_WAIT_WARN_FRAMES => global_budget_line!(
+                    warn,
+                    "GLOBAL proposal budget full, and a capacity message left out has waited past its bound: left_out names the classes left for a later frame; capacity_wait_frames is how long the oldest of the capacity_waiting messages this node's proposals left before has waited since the first did. Those go first, up to their share of a proposal, so check that this archive leads its turns and that its frames carry capacity certificates"
+                ),
+                Some(_) => global_budget_line!(
+                    info,
+                    "GLOBAL proposal budget full: messages left for a later frame; left_out names their classes, capacity_wait_frames how long the oldest of the capacity_waiting messages this node's proposals left before has waited (they go first, up to their share of a proposal)"
                 ),
                 None => tracing::debug!(
                     rank,
